@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+
+# go
+backend/bin/
+backend/tmp/
+*.test
+coverage.out
+
+# node / next
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+npm-debug.log*
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
