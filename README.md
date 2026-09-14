@@ -1,4 +1,4 @@
-# CreatorFlow
+# CreatorFlow Hey Folks
 
 A creator commerce platform: public profile page, digital products, Razorpay payments, secure file delivery, and analytics.
 
