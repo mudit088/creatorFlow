@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS product_files;
+DROP TABLE IF EXISTS products;

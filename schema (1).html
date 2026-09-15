@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CreatorFlow — Database Schema</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    padding: 32px;
+    background: #ffffff;
+    color: #1a1a1a;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { max-width: 900px; margin: 0 auto 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p  { font-size: 14px; color: #555; margin: 0; }
+  button {
+    margin-top: 16px; padding: 8px 14px; font-size: 14px;
+    background: #1a1a1a; color: #fff; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  #diagram { background: #ffffff; padding: 24px; border-radius: 8px; overflow-x: auto; }
+  #diagram svg { max-width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CreatorFlow — Database Schema</h1>
+  <p>Generated from <code>docs/schema.mmd</code>. Edit that file and reload.</p>
+  <button id="export">Download SVG (with white background)</button>
+</header>
+
+<div id="diagram">Loading…</div>
+
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+// Kept inline so this file works offline once loaded, and so you can open it
+// with a double click instead of running a local server.
+const source = await (async () => {
+  try {
+    const res = await fetch('./schema.mmd');
+    if (res.ok) return await res.text();
+  } catch { /* file:// fetch is blocked in some browsers — fall through */ }
+  return document.getElementById('fallback').textContent;
+})();
+
+mermaid.initialize({ startOnLoad: false, theme: 'default', fontSize: 13 });
+const { svg } = await mermaid.render('schema-svg', source);
+document.getElementById('diagram').innerHTML = svg;
+
+document.getElementById('export').addEventListener('click', () => {
+  const el = document.querySelector('#diagram svg').cloneNode(true);
+  // Bake the background in, otherwise the exported file is transparent and
+  // becomes unreadable in any dark viewer.
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  bg.setAttribute('width', '100%');
+  bg.setAttribute('height', '100%');
+  bg.setAttribute('fill', '#ffffff');
+  el.insertBefore(bg, el.firstChild);
+
+  const blob = new Blob([new XMLSerializer().serializeToString(el)], { type: 'image/svg+xml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'creatorflow-schema.svg';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+
+<script type="text/plain" id="fallback">
+erDiagram
+  USERS ||--o| PROFILES : owns
+  USERS ||--o{ REFRESH_TOKENS : authenticates
+  PROFILES ||--o{ LINKS : contains
+  PROFILES ||--o{ PRODUCTS : sells
+  PRODUCTS ||--o{ PRODUCT_FILES : has
+  PROFILES ||--o{ ORDERS : receives
+  ORDERS ||--|{ ORDER_ITEMS : contains
+  PRODUCTS ||--o{ ORDER_ITEMS : sold_as
+  ORDERS ||--o{ PAYMENTS : settled_by
+  PAYMENTS ||--o{ PAYMENT_WEBHOOKS : evidenced_by
+  ORDERS ||--o{ ENTITLEMENTS : grants
+  PRODUCTS ||--o{ ENTITLEMENTS : unlocked_by
+
+  USERS {
+    uuid id PK
+    citext email UK
+    text password_hash
+    text role
+    bool email_verified
+    timestamptz created_at
+  }
+  REFRESH_TOKENS {
+    uuid id PK
+    uuid user_id FK
+    text token_hash UK
+    timestamptz expires_at
+    timestamptz revoked_at
+  }
+  PROFILES {
+    uuid id PK
+    uuid user_id FK
+    citext username UK
+    text display_name
+    text bio
+    text avatar_key
+    bool is_published
+  }
+  LINKS {
+    uuid id PK
+    uuid profile_id FK
+    text title
+    text url
+    int position
+    bool is_active
+  }
+  PRODUCTS {
+    uuid id PK
+    uuid profile_id FK
+    citext slug
+    text title
+    bigint price_minor
+    char currency
+    text status
+  }
+  PRODUCT_FILES {
+    uuid id PK
+    uuid product_id FK
+    text s3_key UK
+    bigint size_bytes
+    text checksum
+  }
+  ORDERS {
+    uuid id PK
+    uuid profile_id FK
+    citext buyer_email
+    text status
+    bigint total_minor
+    char currency
+    text idempotency_key UK
+    timestamptz paid_at
+  }
+  ORDER_ITEMS {
+    uuid id PK
+    uuid order_id FK
+    uuid product_id FK
+    text title_snapshot
+    bigint unit_price_minor
+    int quantity
+  }
+  PAYMENTS {
+    uuid id PK
+    uuid order_id FK
+    text provider
+    text provider_payment_id UK
+    text status
+    bigint amount_minor
+  }
+  PAYMENT_WEBHOOKS {
+    uuid id PK
+    text provider_event_id UK
+    text event_type
+    jsonb raw_payload
+    bool signature_valid
+    timestamptz processed_at
+  }
+  ENTITLEMENTS {
+    uuid id PK
+    uuid order_id FK
+    uuid product_id FK
+    citext buyer_email
+    timestamptz revoked_at
+  }
+</script>
+</body>
+</html>
