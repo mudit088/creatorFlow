@@ -41,9 +41,6 @@ func (h *Handler) RegisterRoutes(r fiber.Router, requireAuth fiber.Handler) {
 	p.Post("/me/links", h.addLink)
 	p.Patch("/me/links/:id", h.updateLink)
 	p.Delete("/me/links/:id", h.deleteLink)
-
-	// The only unauthenticated route in this package.
-	r.Get("/public/:username", h.public)
 }
 
 type createProfileRequest struct {
@@ -100,22 +97,6 @@ type linkResponse struct {
 	URL      string `json:"url"`
 	Position int    `json:"position"`
 	IsActive bool   `json:"is_active"`
-}
-
-// publicProfileResponse omits id, is_published and every timestamp. A visitor
-// needs none of them, and the internal id of a row is not something to hand out
-// for free.
-type publicProfileResponse struct {
-	Username    string           `json:"username"`
-	DisplayName string           `json:"display_name"`
-	Bio         *string          `json:"bio"`
-	AvatarKey   *string          `json:"avatar_key"`
-	Links       []publicLinkItem `json:"links"`
-}
-
-type publicLinkItem struct {
-	Title string `json:"title"`
-	URL   string `json:"url"`
 }
 
 func (h *Handler) create(c *fiber.Ctx) error {
@@ -260,26 +241,6 @@ func (h *Handler) reorder(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"links": newLinkResponses(links)})
-}
-
-func (h *Handler) public(c *fiber.Ctx) error {
-	profile, err := h.svc.Public(c.Context(), c.Params("username"))
-	if err != nil {
-		return mapError(err)
-	}
-
-	links := make([]publicLinkItem, 0, len(profile.Links))
-	for _, l := range profile.Links {
-		links = append(links, publicLinkItem{Title: l.Title, URL: l.URL})
-	}
-
-	return c.JSON(publicProfileResponse{
-		Username:    profile.Username,
-		DisplayName: profile.DisplayName,
-		Bio:         profile.Bio,
-		AvatarKey:   profile.AvatarKey,
-		Links:       links,
-	})
 }
 
 // mapError is the single place domain errors become HTTP. Every handler routes

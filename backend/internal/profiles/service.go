@@ -68,30 +68,6 @@ func (s *Service) Update(ctx context.Context, userID uuid.UUID, displayName, bio
 	return s.repo.UpdateProfile(ctx, userID, displayName, bio, isPublished)
 }
 
-// Public is the anonymous read behind /@username. An unpublished profile returns
-// ErrProfileNotFound, not a permission error: answering "this exists but is
-// private" would turn the public endpoint into a directory of every handle a
-// creator has drafted but not launched.
-func (s *Service) Public(ctx context.Context, username string) (*PublicProfile, error) {
-	profile, err := s.repo.FindPublishedByUsername(ctx, strings.TrimSpace(strings.ToLower(username)))
-	if err != nil {
-		return nil, err
-	}
-
-	links, err := s.repo.ListActiveLinks(ctx, profile.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	return &PublicProfile{
-		Username:    profile.Username,
-		DisplayName: profile.DisplayName,
-		Bio:         profile.Bio,
-		AvatarKey:   profile.AvatarKey,
-		Links:       links,
-	}, nil
-}
-
 // AddLink locks the profile, counts, then inserts, all in one transaction.
 //
 // The lock is what makes the count trustworthy. Without it, two concurrent

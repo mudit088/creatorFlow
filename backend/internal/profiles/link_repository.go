@@ -56,13 +56,6 @@ func (r *Repository) ListLinks(ctx context.Context, profileID uuid.UUID) ([]Link
 	return r.queryLinks(ctx, q, profileID)
 }
 
-// ListActiveLinks is the public page's query. Deactivated links are filtered in
-// SQL so a hidden link never reaches a response struct that might serialise it.
-func (r *Repository) ListActiveLinks(ctx context.Context, profileID uuid.UUID) ([]Link, error) {
-	const q = `SELECT ` + linkColumns + ` FROM links WHERE profile_id = $1 AND is_active ORDER BY position`
-	return r.queryLinks(ctx, q, profileID)
-}
-
 func (r *Repository) queryLinks(ctx context.Context, q string, profileID uuid.UUID) ([]Link, error) {
 	rows, err := r.db.Query(ctx, q, profileID)
 	if err != nil {

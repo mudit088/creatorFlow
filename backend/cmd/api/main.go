@@ -19,7 +19,10 @@ import (
 	"github.com/mudit/creatorflow/backend/internal/database"
 	"github.com/mudit/creatorflow/backend/internal/httpx"
 	"github.com/mudit/creatorflow/backend/internal/middleware"
+	"github.com/mudit/creatorflow/backend/internal/products"
 	"github.com/mudit/creatorflow/backend/internal/profiles"
+	"github.com/mudit/creatorflow/backend/internal/storage"
+	"github.com/mudit/creatorflow/backend/internal/storefront"
 )
 
 func main() {
@@ -164,6 +167,20 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fi
 
 	profiles.NewHandler(profiles.NewService(profiles.NewRepository(pool))).
 		RegisterRoutes(v1, requireAuth)
+
+	// One S3 client for the process. It holds credentials and connection reuse,
+	// so building one per request would be both slower and a way to leak file
+	// descriptors under load.
+	objectStore := storage.New(cfg)
+
+	products.NewHandler(products.NewService(products.NewRepository(pool), objectStore)).
+		RegisterRoutes(v1, requireAuth)
+
+	// The public storefront. No requireAuth here, deliberately and visibly: this
+	// is the one group of routes anyone on the internet can call, so it is worth
+	// being able to see that at a glance in this file.
+	storefront.NewHandler(storefront.NewService(storefront.NewRepository(pool))).
+		RegisterRoutes(v1)
 
 	return app, nil
 }

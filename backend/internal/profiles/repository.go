@@ -96,23 +96,6 @@ func (r *Repository) FindByUserID(ctx context.Context, userID uuid.UUID) (*Profi
 	return p, nil
 }
 
-// FindPublishedByUsername filters on is_published in SQL rather than fetching
-// and checking in Go. An unpublished profile must be indistinguishable from a
-// nonexistent one, and the surest way to guarantee that is for the draft row to
-// never enter the process in the first place.
-func (r *Repository) FindPublishedByUsername(ctx context.Context, username string) (*Profile, error) {
-	const q = `SELECT ` + profileColumns + ` FROM profiles WHERE username = $1 AND is_published`
-
-	p, err := scanProfile(r.db.QueryRow(ctx, q, username))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrProfileNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("find published profile: %w", err)
-	}
-	return p, nil
-}
-
 // UpdateProfile applies a partial update in one statement. COALESCE($n, column)
 // leaves a column untouched when the parameter is NULL, which is what a nil
 // pointer becomes on the wire — so "field absent from the PATCH body" and

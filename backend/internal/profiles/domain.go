@@ -36,18 +36,6 @@ type Link struct {
 	UpdatedAt time.Time
 }
 
-// PublicProfile is what an anonymous visitor to /@username receives. It is a
-// distinct type from Profile on purpose: UserID and IsPublished have no business
-// leaving the server, and a separate struct makes that impossible rather than
-// merely unlikely.
-type PublicProfile struct {
-	Username    string
-	DisplayName string
-	Bio         *string
-	AvatarKey   *string
-	Links       []Link
-}
-
 var (
 	ErrProfileExists   = errors.New("user already has a profile")
 	ErrProfileNotFound = errors.New("profile not found")
