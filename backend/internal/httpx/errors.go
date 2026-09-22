@@ -2,10 +2,17 @@ package httpx
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gofiber/fiber/v2"
 )
+
+// contextKeyRequestID duplicates the key set by middleware.RequestID rather
+// than importing it. httpx must stay at the bottom of the dependency graph so
+// middleware can return httpx errors; importing middleware here would make that
+// a cycle. One duplicated string constant is the cheaper of the two costs.
+const contextKeyRequestID = "request_id"
 
 // APIError is the single error shape this API ever returns. Clients can switch
 // on Code; humans read Message. Internal detail never crosses this boundary —
@@ -54,9 +61,18 @@ func Validation(fields map[string]string) *APIError {
 
 // ErrorHandler is wired into Fiber once, so handlers can simply `return
 // httpx.ErrNotFound` and the response shape stays consistent everywhere.
+//
+// It is also the only place a 500 is allowed to be born, which makes it the
+// only place that has to log. The client is told nothing beyond
+// "internal_error"; the real cause goes to the log tagged with the request ID
+// that was echoed in the response header, so a user reporting a failure hands
+// you the exact key to find it.
 func ErrorHandler(c *fiber.Ctx, err error) error {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
+		if apiErr.status >= http.StatusInternalServerError {
+			logCause(c, err)
+		}
 		return c.Status(apiErr.status).JSON(fiber.Map{"error": apiErr})
 	}
 
@@ -67,6 +83,25 @@ func ErrorHandler(c *fiber.Ctx, err error) error {
 		})
 	}
 
-	// Unknown error: log the real thing, tell the client nothing.
+	// An error that reached here is one nobody translated — a bug by definition.
+	logCause(c, err)
 	return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": ErrInternal})
+}
+
+func logCause(c *fiber.Ctx, err error) {
+	// APIError.Error() returns only the safe, user-facing message, so logging
+	// the wrapper would log exactly the sanitised string we already sent to the
+	// client and none of the detail we actually need.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.cause != nil {
+		err = apiErr.cause
+	}
+
+	requestID, _ := c.Locals(contextKeyRequestID).(string)
+	slog.Error("request failed",
+		"error", err,
+		"request_id", requestID,
+		"method", c.Method(),
+		"path", c.Path(),
+	)
 }

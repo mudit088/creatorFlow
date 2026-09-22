@@ -23,11 +23,11 @@ type Config struct {
 
 	RedisURL string
 
-	S3Endpoint      string
-	S3Region        string
-	S3Bucket        string
-	S3AccessKey     string
-	S3SecretKey     string
+	S3Endpoint       string
+	S3Region         string
+	S3Bucket         string
+	S3AccessKey      string
+	S3SecretKey      string
 	S3ForcePathStyle bool
 
 	JWTAccessSecret  string

@@ -14,10 +14,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/mudit/creatorflow/backend/internal/auth"
 	"github.com/mudit/creatorflow/backend/internal/config"
 	"github.com/mudit/creatorflow/backend/internal/database"
 	"github.com/mudit/creatorflow/backend/internal/httpx"
 	"github.com/mudit/creatorflow/backend/internal/middleware"
+	"github.com/mudit/creatorflow/backend/internal/profiles"
 )
 
 func main() {
@@ -51,7 +53,10 @@ func run() error {
 	}
 	defer func() { _ = cache.Close() }()
 
-	app := newServer(cfg, pool, cache)
+	app, err := newServer(cfg, pool, cache)
+	if err != nil {
+		return err
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -73,7 +78,7 @@ func run() error {
 	}
 }
 
-func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) *fiber.App {
+func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fiber.App, error) {
 	app := fiber.New(fiber.Config{
 		AppName:               "creatorflow-api",
 		ErrorHandler:          httpx.ErrorHandler,
@@ -132,7 +137,35 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) *fib
 		return c.JSON(fiber.Map{"pong": true, "request_id": middleware.FromContext(c)})
 	})
 
-	return app
+	// One issuer for the whole process. It is the only thing that holds the
+	// signing secret, and both the auth service (which mints tokens) and the
+	// middleware (which verifies them) are handed the same instance — so a
+	// rotated secret can never be half-applied.
+	tokens := auth.NewTokenIssuer(cfg.JWTAccessSecret, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+
+	authSvc, err := auth.NewService(auth.NewRepository(pool), tokens)
+	if err != nil {
+		return nil, err
+	}
+
+	// Constructed here, once, so this file is the only place you need to read to
+	// know which routes require a valid access token.
+	requireAuth := middleware.RequireAuth(tokens, httpx.ErrUnauthorized)
+
+	auth.NewHandler(authSvc, auth.CookieConfig{
+		// Scoped to the auth routes: the refresh cookie is never attached to a
+		// product, storefront or payment request, so it cannot leak through one.
+		Path: "/api/v1/auth",
+		// http://localhost cannot set a Secure cookie, and production must never
+		// send this one over anything but TLS.
+		Secure: cfg.IsProduction(),
+		MaxAge: cfg.RefreshTokenTTL,
+	}).RegisterRoutes(v1, requireAuth)
+
+	profiles.NewHandler(profiles.NewService(profiles.NewRepository(pool))).
+		RegisterRoutes(v1, requireAuth)
+
+	return app, nil
 }
 
 func newLogger(cfg *config.Config) *slog.Logger {
