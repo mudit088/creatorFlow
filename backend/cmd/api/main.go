@@ -17,10 +17,14 @@ import (
 	"github.com/mudit/creatorflow/backend/internal/auth"
 	"github.com/mudit/creatorflow/backend/internal/config"
 	"github.com/mudit/creatorflow/backend/internal/database"
+	"github.com/mudit/creatorflow/backend/internal/delivery"
 	"github.com/mudit/creatorflow/backend/internal/httpx"
 	"github.com/mudit/creatorflow/backend/internal/middleware"
+	"github.com/mudit/creatorflow/backend/internal/orders"
+	"github.com/mudit/creatorflow/backend/internal/payments"
 	"github.com/mudit/creatorflow/backend/internal/products"
 	"github.com/mudit/creatorflow/backend/internal/profiles"
+	"github.com/mudit/creatorflow/backend/internal/razorpay"
 	"github.com/mudit/creatorflow/backend/internal/storage"
 	"github.com/mudit/creatorflow/backend/internal/storefront"
 )
@@ -95,50 +99,15 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fi
 	app.Use(recover.New())
 	app.Use(middleware.RequestID())
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     joinOrigins(cfg.CORSAllowedOrigins),
-		AllowMethods:     "GET,POST,PATCH,DELETE,OPTIONS",
+		AllowOrigins: joinOrigins(cfg.CORSAllowedOrigins),
+		// The API speaks GET and POST only, so nothing else is advertised.
+		// Narrowing this is not cosmetic: a browser preflight asks what is
+		// allowed, and answering with verbs no route accepts invites a client to
+		// send a request that can only ever 405.
+		AllowMethods:     "GET,POST,OPTIONS",
 		AllowHeaders:     "Content-Type,Authorization,X-Request-ID,Idempotency-Key",
 		AllowCredentials: true,
 	}))
-
-	// Liveness: is the process up? Deliberately checks nothing else — if this
-	// touched the database, a brief database blip would make the orchestrator
-	// kill healthy API containers and turn a small outage into a large one.
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "env": cfg.AppEnv})
-	})
-
-	// Readiness: should this instance receive traffic? This one does check
-	// dependencies, because an instance that cannot reach PostgreSQL should be
-	// pulled from the load balancer rather than serving errors.
-	app.Get("/ready", func(c *fiber.Ctx) error {
-		ctx, cancel := context.WithTimeout(c.Context(), 2*time.Second)
-		defer cancel()
-
-		checks := fiber.Map{"postgres": "ok", "redis": "ok"}
-		ready := true
-
-		if err := pool.Ping(ctx); err != nil {
-			checks["postgres"] = "unavailable"
-			ready = false
-		}
-		if err := cache.Ping(ctx).Err(); err != nil {
-			// Redis is a cache, not a source of truth — degraded, not down.
-			checks["redis"] = "degraded"
-		}
-
-		status := fiber.StatusOK
-		if !ready {
-			status = fiber.StatusServiceUnavailable
-		}
-		return c.Status(status).JSON(fiber.Map{"ready": ready, "checks": checks})
-	})
-
-	// Versioned from day one. Adding /api/v2 later must not require breaking v1.
-	v1 := app.Group("/api/v1")
-	v1.Get("/ping", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"pong": true, "request_id": middleware.FromContext(c)})
-	})
 
 	// One issuer for the whole process. It is the only thing that holds the
 	// signing secret, and both the auth service (which mints tokens) and the
@@ -151,36 +120,47 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fi
 		return nil, err
 	}
 
-	// Constructed here, once, so this file is the only place you need to read to
-	// know which routes require a valid access token.
-	requireAuth := middleware.RequireAuth(tokens, httpx.ErrUnauthorized)
-
-	auth.NewHandler(authSvc, auth.CookieConfig{
-		// Scoped to the auth routes: the refresh cookie is never attached to a
-		// product, storefront or payment request, so it cannot leak through one.
-		Path: "/api/v1/auth",
-		// http://localhost cannot set a Secure cookie, and production must never
-		// send this one over anything but TLS.
-		Secure: cfg.IsProduction(),
-		MaxAge: cfg.RefreshTokenTTL,
-	}).RegisterRoutes(v1, requireAuth)
-
-	profiles.NewHandler(profiles.NewService(profiles.NewRepository(pool))).
-		RegisterRoutes(v1, requireAuth)
-
 	// One S3 client for the process. It holds credentials and connection reuse,
 	// so building one per request would be both slower and a way to leak file
 	// descriptors under load.
 	objectStore := storage.New(cfg)
 
-	products.NewHandler(products.NewService(products.NewRepository(pool), objectStore)).
-		RegisterRoutes(v1, requireAuth)
+	// One Razorpay client for the process, holding both secrets. When the keys
+	// are absent — the normal state on a laptop — it reports itself disabled and
+	// checkout still works end to end, minus the payment itself.
+	razorpayClient := razorpay.New(cfg)
+	if !razorpayClient.Enabled() {
+		slog.Warn("razorpay is not configured: orders will be created without a provider order and cannot be paid")
+	}
 
-	// The public storefront. No requireAuth here, deliberately and visibly: this
-	// is the one group of routes anyone on the internet can call, so it is worth
-	// being able to see that at a glance in this file.
-	storefront.NewHandler(storefront.NewService(storefront.NewRepository(pool))).
-		RegisterRoutes(v1)
+	live, ready := newProbes(cfg.AppEnv,
+		pool.Ping,
+		func(ctx context.Context) error { return cache.Ping(ctx).Err() },
+	)
+
+	// Construction happens here; the URL-to-handler mapping lives in routes.go.
+	registerRoutes(app, handlers{
+		auth: auth.NewHandler(authSvc, auth.CookieConfig{
+			// Scoped to the auth routes: the refresh cookie is never attached to
+			// a product, storefront or payment request, so it cannot leak
+			// through one.
+			Path: "/api/v1/auth",
+			// http://localhost cannot set a Secure cookie, and production must
+			// never send this one over anything but TLS.
+			Secure: cfg.IsProduction(),
+			MaxAge: cfg.RefreshTokenTTL,
+		}),
+		profiles:   profiles.NewHandler(profiles.NewService(profiles.NewRepository(pool))),
+		products:   products.NewHandler(products.NewService(products.NewRepository(pool), objectStore)),
+		storefront: storefront.NewHandler(storefront.NewService(storefront.NewRepository(pool))),
+		orders:     orders.NewHandler(orders.NewService(orders.NewRepository(pool), razorpayClient)),
+		payments:   payments.NewHandler(payments.NewService(payments.NewRepository(pool), razorpayClient)),
+		delivery:   delivery.NewHandler(delivery.NewService(delivery.NewRepository(pool), objectStore)),
+
+		requireAuth: middleware.RequireAuth(tokens, httpx.ErrUnauthorized),
+		live:        live,
+		ready:       ready,
+	})
 
 	return app, nil
 }

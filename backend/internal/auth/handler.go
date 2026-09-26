@@ -35,21 +35,6 @@ func NewHandler(svc *Service, cookie CookieConfig) *Handler {
 	return &Handler{svc: svc, cookie: cookie}
 }
 
-// RegisterRoutes takes the auth middleware rather than building it, so main.go
-// remains the single place where you can read which routes are protected.
-func (h *Handler) RegisterRoutes(r fiber.Router, requireAuth fiber.Handler) {
-	g := r.Group("/auth")
-	g.Post("/register", h.register)
-	g.Post("/login", h.login)
-	// Refresh and logout are authenticated by the cookie, not by the access
-	// token — demanding a valid access token to refresh would defeat the point,
-	// since the whole reason to refresh is that it expired.
-	g.Post("/refresh", h.refresh)
-	g.Post("/logout", h.logout)
-
-	r.Get("/me", requireAuth, h.me)
-}
-
 type credentialsRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -72,7 +57,7 @@ type sessionResponse struct {
 	User        userResponse `json:"user"`
 }
 
-func (h *Handler) register(c *fiber.Ctx) error {
+func (h *Handler) Register(c *fiber.Ctx) error {
 	req, err := parseCredentials(c)
 	if err != nil {
 		return err
@@ -95,7 +80,7 @@ func (h *Handler) register(c *fiber.Ctx) error {
 	return c.Status(http.StatusCreated).JSON(newSessionResponse(session))
 }
 
-func (h *Handler) login(c *fiber.Ctx) error {
+func (h *Handler) Login(c *fiber.Ctx) error {
 	req, err := parseCredentials(c)
 	if err != nil {
 		return err
@@ -117,7 +102,7 @@ func (h *Handler) login(c *fiber.Ctx) error {
 	return c.JSON(newSessionResponse(session))
 }
 
-func (h *Handler) refresh(c *fiber.Ctx) error {
+func (h *Handler) Refresh(c *fiber.Ctx) error {
 	raw := c.Cookies(refreshCookieName)
 	if raw == "" {
 		return httpx.New(http.StatusUnauthorized, "no_refresh_token", "No session cookie was sent.")
@@ -144,7 +129,7 @@ func (h *Handler) refresh(c *fiber.Ctx) error {
 	return c.JSON(newSessionResponse(session))
 }
 
-func (h *Handler) logout(c *fiber.Ctx) error {
+func (h *Handler) Logout(c *fiber.Ctx) error {
 	if err := h.svc.Logout(c.Context(), c.Cookies(refreshCookieName)); err != nil {
 		return httpx.ErrInternal.WithCause(err)
 	}
@@ -153,7 +138,7 @@ func (h *Handler) logout(c *fiber.Ctx) error {
 	return c.SendStatus(http.StatusNoContent)
 }
 
-func (h *Handler) me(c *fiber.Ctx) error {
+func (h *Handler) Me(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized

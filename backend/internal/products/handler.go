@@ -19,22 +19,6 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-func (h *Handler) RegisterRoutes(r fiber.Router, requireAuth fiber.Handler) {
-	g := r.Group("/products", requireAuth)
-	g.Post("/", h.create)
-	g.Get("/", h.list)
-	g.Get("/:id", h.get)
-	g.Patch("/:id", h.update)
-
-	// The upload endpoints. Note that none of them carry a file body: the API
-	// hands out a signed URL and later asks S3 what happened. A 2 GB product
-	// never touches this process, which is what keeps the API's memory flat and
-	// its BodyLimit at 2 MB.
-	g.Post("/:id/upload-url", h.requestUpload)
-	g.Post("/:id/files/:fileId/confirm", h.confirmUpload)
-	g.Delete("/:id/files/:fileId", h.deleteFile)
-}
-
 type createProductRequest struct {
 	Slug        string  `json:"slug"`
 	Title       string  `json:"title"`
@@ -95,7 +79,7 @@ type uploadIntentResponse struct {
 	Method          string            `json:"method"`
 }
 
-func (h *Handler) create(c *fiber.Ctx) error {
+func (h *Handler) Create(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -114,7 +98,7 @@ func (h *Handler) create(c *fiber.Ctx) error {
 	return c.Status(http.StatusCreated).JSON(newProductResponse(product))
 }
 
-func (h *Handler) list(c *fiber.Ctx) error {
+func (h *Handler) List(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -132,7 +116,7 @@ func (h *Handler) list(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"products": out})
 }
 
-func (h *Handler) get(c *fiber.Ctx) error {
+func (h *Handler) Get(c *fiber.Ctx) error {
 	userID, productID, err := h.scope(c)
 	if err != nil {
 		return err
@@ -149,7 +133,7 @@ func (h *Handler) get(c *fiber.Ctx) error {
 	})
 }
 
-func (h *Handler) update(c *fiber.Ctx) error {
+func (h *Handler) Update(c *fiber.Ctx) error {
 	userID, productID, err := h.scope(c)
 	if err != nil {
 		return err
@@ -168,7 +152,7 @@ func (h *Handler) update(c *fiber.Ctx) error {
 	return c.JSON(newProductResponse(product))
 }
 
-func (h *Handler) requestUpload(c *fiber.Ctx) error {
+func (h *Handler) RequestUpload(c *fiber.Ctx) error {
 	userID, productID, err := h.scope(c)
 	if err != nil {
 		return err
@@ -195,7 +179,7 @@ func (h *Handler) requestUpload(c *fiber.Ctx) error {
 	})
 }
 
-func (h *Handler) confirmUpload(c *fiber.Ctx) error {
+func (h *Handler) ConfirmUpload(c *fiber.Ctx) error {
 	userID, productID, err := h.scope(c)
 	if err != nil {
 		return err
@@ -214,7 +198,7 @@ func (h *Handler) confirmUpload(c *fiber.Ctx) error {
 	return c.JSON(newFileResponse(*file))
 }
 
-func (h *Handler) deleteFile(c *fiber.Ctx) error {
+func (h *Handler) DeleteFile(c *fiber.Ctx) error {
 	userID, productID, err := h.scope(c)
 	if err != nil {
 		return err

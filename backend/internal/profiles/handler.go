@@ -19,30 +19,6 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterRoutes deliberately uses /profiles/me rather than /profiles/:id for
-// everything the owner touches.
-//
-// With an id in the path, every single handler has to remember to check that the
-// id belongs to the caller, and the day one of them forgets is the day anyone
-// can edit anyone's page. With /me the id comes from the verified access token
-// and is never client-supplied, so that entire class of authorization bug cannot
-// be written. Links nest under it for the same reason: the URL states the
-// ownership the SQL then enforces.
-func (h *Handler) RegisterRoutes(r fiber.Router, requireAuth fiber.Handler) {
-	p := r.Group("/profiles", requireAuth)
-	p.Post("/", h.create)
-	p.Get("/me", h.own)
-	p.Patch("/me", h.update)
-
-	// Registered before /me/links/:id so "order" is never parsed as a link id.
-	// They differ by method today, but relying on that is a trap for whoever
-	// later adds PUT /me/links/:id.
-	p.Put("/me/links/order", h.reorder)
-	p.Post("/me/links", h.addLink)
-	p.Patch("/me/links/:id", h.updateLink)
-	p.Delete("/me/links/:id", h.deleteLink)
-}
-
 type createProfileRequest struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
@@ -99,7 +75,7 @@ type linkResponse struct {
 	IsActive bool   `json:"is_active"`
 }
 
-func (h *Handler) create(c *fiber.Ctx) error {
+func (h *Handler) Create(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -118,7 +94,7 @@ func (h *Handler) create(c *fiber.Ctx) error {
 	return c.Status(http.StatusCreated).JSON(newProfileResponse(profile))
 }
 
-func (h *Handler) own(c *fiber.Ctx) error {
+func (h *Handler) Own(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -135,7 +111,7 @@ func (h *Handler) own(c *fiber.Ctx) error {
 	})
 }
 
-func (h *Handler) update(c *fiber.Ctx) error {
+func (h *Handler) Update(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -154,7 +130,7 @@ func (h *Handler) update(c *fiber.Ctx) error {
 	return c.JSON(newProfileResponse(profile))
 }
 
-func (h *Handler) addLink(c *fiber.Ctx) error {
+func (h *Handler) AddLink(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -173,7 +149,7 @@ func (h *Handler) addLink(c *fiber.Ctx) error {
 	return c.Status(http.StatusCreated).JSON(newLinkResponse(*link))
 }
 
-func (h *Handler) updateLink(c *fiber.Ctx) error {
+func (h *Handler) UpdateLink(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -197,7 +173,7 @@ func (h *Handler) updateLink(c *fiber.Ctx) error {
 	return c.JSON(newLinkResponse(*link))
 }
 
-func (h *Handler) deleteLink(c *fiber.Ctx) error {
+func (h *Handler) DeleteLink(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized
@@ -215,7 +191,7 @@ func (h *Handler) deleteLink(c *fiber.Ctx) error {
 	return c.SendStatus(http.StatusNoContent)
 }
 
-func (h *Handler) reorder(c *fiber.Ctx) error {
+func (h *Handler) Reorder(c *fiber.Ctx) error {
 	userID, ok := middleware.UserID(c)
 	if !ok {
 		return httpx.ErrUnauthorized

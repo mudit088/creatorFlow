@@ -1,0 +1,1167 @@
+{
+  "info": {
+    "name": "CreatorFlow API (local)",
+    "description": "Every route the Go API serves, in the order you would exercise them: register -> profile -> product -> upload -> publish -> public page -> checkout -> webhook.\n\nSet `baseUrl` (default http://localhost:8080) and, for the webhook requests, `webhookSecret` to the RAZORPAY_WEBHOOK_SECRET from .env.\n\nTokens chain automatically: Register/Login store the access token in a collection variable that every authenticated request uses, and Create product / Add link / Create order store their ids for the requests that follow.\n\nThe API speaks GET and POST only - state changes are POSTs whose path names the action.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "userEmail",
+      "value": ""
+    },
+    {
+      "key": "profileId",
+      "value": ""
+    },
+    {
+      "key": "username",
+      "value": ""
+    },
+    {
+      "key": "productId",
+      "value": ""
+    },
+    {
+      "key": "productSlug",
+      "value": ""
+    },
+    {
+      "key": "fileId",
+      "value": ""
+    },
+    {
+      "key": "uploadUrl",
+      "value": ""
+    },
+    {
+      "key": "linkId",
+      "value": ""
+    },
+    {
+      "key": "orderId",
+      "value": ""
+    },
+    {
+      "key": "orderTotal",
+      "value": ""
+    },
+    {
+      "key": "providerOrderId",
+      "value": ""
+    },
+    {
+      "key": "razorpayKeyId",
+      "value": ""
+    },
+    {
+      "key": "webhookSecret",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookSignature",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Probes",
+      "item": [
+        {
+          "name": "Health (liveness)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Checks nothing but the process. Deliberately does not touch the database: if it did, a brief Postgres blip would make an orchestrator kill healthy containers.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Ready (readiness)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/ready",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ready"
+              ]
+            },
+            "description": "Postgres unreachable -> ready:false. Redis unreachable -> degraded but still ready, because the cache is not a source of truth.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Ping",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ping",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ping"
+              ]
+            },
+            "description": "Echoes the request id, so you can confirm the middleware chain is wired.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Creates an account and returns an access token. The refresh token is set as an HttpOnly cookie scoped to /api/v1/auth, so Postman's cookie jar handles it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"creator{{$timestamp}}@example.com\",\n  \"password\": \"CorrectHorse1!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.access_token) {",
+                  "    pm.collectionVariables.set('accessToken', body.access_token);",
+                  "    pm.collectionVariables.set('userEmail', body.user ? body.user.email : '');",
+                  "}",
+                  "pm.test('registered', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Same error for 'no such user' and 'wrong password', plus a dummy hash on the not-found branch so both paths take the same time. Prevents account enumeration.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"CorrectHorse1!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.access_token) { pm.collectionVariables.set('accessToken', body.access_token); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Authenticated by the refresh cookie, not the access token - demanding a valid access token to refresh would defeat the point. Rotates the token: presenting a revoked one again revokes every session for that user.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.access_token) { pm.collectionVariables.set('accessToken', body.access_token); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me"
+              ]
+            },
+            "description": "Requires a valid access token."
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Revokes the refresh token and clears the cookie.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Profile & links",
+      "item": [
+        {
+          "name": "Create profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles"
+              ]
+            },
+            "description": "One profile per user. The username is the public /@handle.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"creator{{$randomInt}}\",\n  \"display_name\": \"Test Creator\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.id) {",
+                  "    pm.collectionVariables.set('profileId', body.id);",
+                  "    pm.collectionVariables.set('username', body.username);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get my profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles",
+                "me"
+              ]
+            },
+            "description": "Addresses /me rather than /profiles/:id: the id comes from the verified token and is never client-supplied, so 'forgot to check ownership' cannot be written."
+          },
+          "response": []
+        },
+        {
+          "name": "Update profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles/me/update",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles",
+                "me",
+                "update"
+              ]
+            },
+            "description": "Fields are pointers server-side, so an absent field and an explicit empty string are different things.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"display_name\": \"Renamed Creator\",\n  \"bio\": \"Fitness coach\",\n  \"is_published\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles/me/links",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles",
+                "me",
+                "links"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"YouTube\",\n  \"url\": \"https://youtube.com/@example\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.id) { pm.collectionVariables.set('linkId', body.id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reorder links",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles/me/links/order",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles",
+                "me",
+                "links",
+                "order"
+              ]
+            },
+            "description": "Positions are enforced by a DEFERRABLE UNIQUE constraint, so a permutation is one UPDATE per row and the check happens at COMMIT.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"link_ids\": [\n    \"{{linkId}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles/me/links/{{linkId}}/update",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles",
+                "me",
+                "links",
+                "{{linkId}}",
+                "update"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"YouTube (main)\",\n  \"is_active\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete link",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/profiles/me/links/{{linkId}}/delete",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "profiles",
+                "me",
+                "links",
+                "{{linkId}}",
+                "delete"
+              ]
+            },
+            "description": "Returns 204. Not idempotent the way DELETE is - deleting twice gives 404."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Products & files",
+      "item": [
+        {
+          "name": "Create product",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products"
+              ]
+            },
+            "description": "price_minor is paise: 49900 = Rs 499. Never a float.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"slug\": \"workout-plan-{{$randomInt}}\",\n  \"title\": \"12 Week Plan\",\n  \"description\": \"A plan\",\n  \"price_minor\": 49900\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.id) {",
+                  "    pm.collectionVariables.set('productId', body.id);",
+                  "    pm.collectionVariables.set('productSlug', body.slug);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Get product",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "Scoped to the caller's profile in the same statement that fetches the row: someone else's product is reported as not found."
+          },
+          "response": []
+        },
+        {
+          "name": "Request upload URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products/{{productId}}/upload-url",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products",
+                "{{productId}}",
+                "upload-url"
+              ]
+            },
+            "description": "Returns a presigned S3/MinIO PUT URL. The signature covers Content-Type and Content-Length, so the client can only upload what it declared. Files never pass through the API.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"plan.pdf\",\n  \"content_type\": \"application/pdf\",\n  \"size_bytes\": 1024\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.file) { pm.collectionVariables.set('fileId', body.file.id); }",
+                  "if (body.upload_url) { pm.collectionVariables.set('uploadUrl', body.upload_url); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Upload file to MinIO (direct PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/pdf"
+              }
+            ],
+            "url": "{{uploadUrl}}",
+            "description": "NOT an API route - this goes straight to MinIO with the presigned URL from the previous request, which is why there is no Authorization header. The body is docs/sample-1024.pdf, exactly 1024 bytes, because the signature covers the Content-Length declared in the previous request: send a different size and S3 rejects it. In Postman, re-pick the file under Body -> binary if it shows as missing.",
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": "docs/sample-1024.pdf"
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('object stored', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm upload",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products/{{productId}}/files/{{fileId}}/confirm",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products",
+                "{{productId}}",
+                "files",
+                "{{fileId}}",
+                "confirm"
+              ]
+            },
+            "description": "The API asks S3 whether the object exists and matches what was declared. Until this succeeds the file row has uploaded_at NULL and the product cannot be published."
+          },
+          "response": []
+        },
+        {
+          "name": "Publish product",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products/{{productId}}/update",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products",
+                "{{productId}}",
+                "update"
+              ]
+            },
+            "description": "Refuses to publish a product with no confirmed file - the one invariant here that spans two tables and so cannot be a CHECK constraint.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"published\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update product",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products/{{productId}}/update",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products",
+                "{{productId}}",
+                "update"
+              ]
+            },
+            "description": "Changing the price does not alter existing orders: they carry snapshots.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"12 Week Plan v2\",\n  \"price_minor\": 59900\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Public storefront",
+      "item": [
+        {
+          "name": "Public profile page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/public/{{username}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "public",
+                "{{username}}"
+              ]
+            },
+            "description": "World-readable. Returns its own response types, separate from the owner-facing ones.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Public product page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/public/{{username}}/{{productSlug}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "public",
+                "{{username}}",
+                "{{productSlug}}"
+              ]
+            },
+            "description": "",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Checkout",
+      "item": [
+        {
+          "name": "Create order (checkout)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Public: buyers are guests. Note the body carries NO amount - the total is summed from the database. Send the same Idempotency-Key twice and you get 200 with the same order instead of a second one (replace {{$guid}} with a fixed string to try it).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"buyer_email\": \"buyer@example.com\",\n  \"product_ids\": [\n    \"{{productId}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.id) {",
+                  "    pm.collectionVariables.set('orderId', body.id);",
+                  "    pm.collectionVariables.set('orderTotal', body.total_minor);",
+                  "}",
+                  "if (body.checkout) {",
+                  "    pm.collectionVariables.set('providerOrderId', body.checkout.provider_order_id);",
+                  "    pm.collectionVariables.set('razorpayKeyId', body.checkout.key_id);",
+                  "} else {",
+                  "    console.log('no checkout block: RAZORPAY_KEY_ID/SECRET not configured');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. Payments webhook",
+      "item": [
+        {
+          "name": "Webhook: payment.captured (signed)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Razorpay-Signature",
+                "value": "{{webhookSignature}}"
+              },
+              {
+                "key": "X-Razorpay-Event-Id",
+                "value": "evt_{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments/webhook",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "payments",
+                "webhook"
+              ]
+            },
+            "description": "The pre-request script signs the resolved body with {{webhookSecret}}, exactly as Razorpay does: hex(HMAC-SHA256(rawBody, secret)). Set webhookSecret to the value in .env. Amount must equal the order total or nothing settles. Re-send with the same event id and it returns 200 having changed nothing.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"entity\": \"event\",\n  \"event\": \"payment.captured\",\n  \"contains\": [\n    \"payment\"\n  ],\n  \"payload\": {\n    \"payment\": {\n      \"entity\": {\n        \"id\": \"pay_manual_{{$timestamp}}\",\n        \"order_id\": \"{{providerOrderId}}\",\n        \"amount\": {{orderTotal}},\n        \"currency\": \"INR\",\n        \"status\": \"captured\"\n      }\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('accepted', () => pm.response.to.have.status(200));"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Reproduces Razorpay's signature: hex(HMAC-SHA256(raw body, webhook secret)).",
+                  "// The body is resolved first, because the bytes we sign must be the bytes we send.",
+                  "const secret = pm.environment.get('webhookSecret')",
+                  "    || pm.globals.get('webhookSecret')",
+                  "    || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - this request will get a 401');",
+                  "}",
+                  "const raw = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.body.raw = raw;",
+                  "const sig = CryptoJS.HmacSHA256(raw, secret || '').toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('webhookSignature', sig);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Webhook: forged signature (expect 401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Razorpay-Signature",
+                "value": "deadbeef"
+              },
+              {
+                "key": "X-Razorpay-Event-Id",
+                "value": "evt_forged_{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments/webhook",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "payments",
+                "webhook"
+              ]
+            },
+            "description": "Should return 401 and write nothing. This is the check that stops the endpoint being an unauthenticated 'mark my order paid' button.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"entity\": \"event\",\n  \"event\": \"payment.captured\",\n  \"contains\": [\n    \"payment\"\n  ],\n  \"payload\": {\n    \"payment\": {\n      \"entity\": {\n        \"id\": \"pay_manual_{{$timestamp}}\",\n        \"order_id\": \"{{providerOrderId}}\",\n        \"amount\": {{orderTotal}},\n        \"currency\": \"INR\",\n        \"status\": \"captured\"\n      }\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('forged delivery is rejected', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "7. Cleanup (run last)",
+      "item": [
+        {
+          "name": "Delete file",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/products/{{productId}}/files/{{fileId}}/delete",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "products",
+                "{{productId}}",
+                "files",
+                "{{fileId}}",
+                "delete"
+              ]
+            },
+            "description": "Runs last on purpose. It removes the row and the S3 object but does NOT un-publish the product, so afterwards the product is published with nothing to deliver - and checkout will refuse to sell it (422). Run this before Checkout and you will see exactly that."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

@@ -17,15 +17,6 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterRoutes mounts the only endpoints in this API that take no
-// authentication at all. Everything here is world-readable by design, which is
-// exactly why the types it returns are separate from the owner-facing ones.
-func (h *Handler) RegisterRoutes(r fiber.Router) {
-	g := r.Group("/public")
-	g.Get("/:username", h.page)
-	g.Get("/:username/:slug", h.product)
-}
-
 type creatorResponse struct {
 	Username    string  `json:"username"`
 	DisplayName string  `json:"display_name"`
@@ -66,7 +57,7 @@ type productDetailResponse struct {
 	Includes    []deliverableResponse `json:"includes"`
 }
 
-func (h *Handler) page(c *fiber.Ctx) error {
+func (h *Handler) Page(c *fiber.Ctx) error {
 	page, err := h.svc.Page(c.Context(), c.Params("username"))
 	if err != nil {
 		return mapError(err)
@@ -91,7 +82,7 @@ func (h *Handler) page(c *fiber.Ctx) error {
 	})
 }
 
-func (h *Handler) product(c *fiber.Ctx) error {
+func (h *Handler) Product(c *fiber.Ctx) error {
 	detail, err := h.svc.Product(c.Context(), c.Params("username"), c.Params("slug"))
 	if err != nil {
 		return mapError(err)
