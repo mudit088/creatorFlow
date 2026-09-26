@@ -153,3 +153,19 @@ func translateProductError(err error) error {
 		return fmt.Errorf("product write: %w", err)
 	}
 }
+
+// PublicCoords returns the username and slug a product is published under — the
+// two values that identify its pages in the storefront cache. One indexed join
+// on a write path, which is where this system can afford a query.
+func (r *Repository) PublicCoords(ctx context.Context, productID uuid.UUID) (username, slug string, err error) {
+	const q = `
+		SELECT pr.username, p.slug
+		FROM products p
+		JOIN profiles pr ON pr.id = p.profile_id
+		WHERE p.id = $1`
+
+	if err := r.db.QueryRow(ctx, q, productID).Scan(&username, &slug); err != nil {
+		return "", "", fmt.Errorf("public coords: %w", err)
+	}
+	return username, slug, nil
+}

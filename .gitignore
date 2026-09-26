@@ -14,6 +14,8 @@ frontend/.next/
 frontend/out/
 frontend/.turbo/
 npm-debug.log*
+.env
+.env.example
 
 # editor / os
 .DS_Store

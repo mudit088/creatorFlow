@@ -6,6 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"github.com/mudit/creatorflow/backend/internal/analytics"
 	"github.com/mudit/creatorflow/backend/internal/auth"
 	"github.com/mudit/creatorflow/backend/internal/delivery"
 	"github.com/mudit/creatorflow/backend/internal/httpx"
@@ -41,9 +42,11 @@ type handlers struct {
 	storefront *storefront.Handler
 	orders     *orders.Handler
 	delivery   *delivery.Handler
+	analytics  *analytics.Handler
 	payments   *payments.Handler
 
 	requireAuth fiber.Handler
+	limiter     *middleware.RateLimiter
 	// probes are closures over the pool and cache, built in main.go, so this
 	// file needs no database imports.
 	live  fiber.Handler
@@ -59,6 +62,45 @@ type handlers struct {
 // protocol-level guarantee it is safe. What it buys is a surface every client,
 // proxy and HTML form can reach with no verb negotiation.
 func registerRoutes(app *fiber.App, h handlers) {
+	// Rate limits, gathered here so the whole policy is one block rather than a
+	// number buried next to each route. Every one of these is per-window and
+	// per-caller; the identifier differs by endpoint and is the interesting part.
+	//
+	// Nothing here protects against a distributed attack — a thousand addresses
+	// each making nine login attempts sails through. This is a brake on scripts
+	// and accidents, which is what an application-level limiter can honestly be;
+	// volumetric defence belongs at the edge, in phase 15.
+	var (
+		// Credential endpoints. Tight, because the thing being guessed is a
+		// password and each attempt is cheap for the attacker and expensive for
+		// us — argon2id is deliberately slow, so this also protects the CPU.
+		limitLogin = h.limiter.Limit(middleware.RateLimitConfig{
+			Name: "auth", Limit: 10, Window: time.Minute, By: middleware.ByIP,
+		})
+		// Checkout: the only unauthenticated route that writes rows and calls a
+		// third party. A real buyer clicks Buy once or twice.
+		limitCheckout = h.limiter.Limit(middleware.RateLimitConfig{
+			Name: "checkout", Limit: 10, Window: time.Minute, By: middleware.ByIP,
+		})
+		// Download: bucketed by ORDER, not by address. The attack this stops is
+		// guessing which email bought a leaked order id, and an attacker with a
+		// hundred addresses still gets twenty guesses per hour against that one
+		// order. Bucketing by IP would have missed the point entirely.
+		limitDownload = h.limiter.Limit(middleware.RateLimitConfig{
+			Name: "download", Limit: 20, Window: time.Hour, By: middleware.ByPathParam("id"),
+		})
+		// The public storefront: generous, since this is a page a human refreshes
+		// and a crawler walks. It exists to stop a scraper, not a visitor.
+		limitPublic = h.limiter.Limit(middleware.RateLimitConfig{
+			Name: "public", Limit: 120, Window: time.Minute, By: middleware.ByIP,
+		})
+		// Authenticated creator routes, bucketed by user rather than address so
+		// an office full of creators does not share one allowance.
+		limitCreator = h.limiter.Limit(middleware.RateLimitConfig{
+			Name: "creator", Limit: 300, Window: time.Minute, By: middleware.ByUser,
+		})
+	)
+
 	// ---------------------------------------------------------------- probes
 	// Outside /api/v1 on purpose: these describe the process, not the product,
 	// and an orchestrator should not have to know the API's version to check
@@ -75,9 +117,9 @@ func registerRoutes(app *fiber.App, h handlers) {
 
 	// ------------------------------------------------------------------ auth
 	// Public: these are how a caller obtains credentials in the first place.
-	v1.Post("/auth/register", h.auth.Register)
-	v1.Post("/auth/login", h.auth.Login)
-	v1.Post("/auth/refresh", h.auth.Refresh)
+	v1.Post("/auth/register", limitLogin, h.auth.Register)
+	v1.Post("/auth/login", limitLogin, h.auth.Login)
+	v1.Post("/auth/refresh", limitLogin, h.auth.Refresh)
 	v1.Post("/auth/logout", h.auth.Logout)
 
 	// --------------------------------------------------------------- creator
@@ -85,7 +127,7 @@ func registerRoutes(app *fiber.App, h handlers) {
 	// per route rather than per group so that this list can be read without
 	// tracking which group a line belongs to: if a route does not name
 	// requireAuth, it is public.
-	v1.Get("/me", h.requireAuth, h.auth.Me)
+	v1.Get("/me", h.requireAuth, limitCreator, h.auth.Me)
 
 	// Owner routes address /me rather than /profiles/:id. With an id in the path
 	// every handler has to remember to check that the id belongs to the caller,
@@ -93,25 +135,30 @@ func registerRoutes(app *fiber.App, h handlers) {
 	// the id comes from the verified token and is never client-supplied, so that
 	// entire class of authorization bug cannot be written. Links nest under it
 	// for the same reason: the URL states the ownership the SQL then enforces.
-	v1.Post("/profiles", h.requireAuth, h.profiles.Create)
-	v1.Get("/profiles/me", h.requireAuth, h.profiles.Own)
-	v1.Post("/profiles/me/update", h.requireAuth, h.profiles.Update)
-	v1.Post("/profiles/me/links", h.requireAuth, h.profiles.AddLink)
-	v1.Post("/profiles/me/links/order", h.requireAuth, h.profiles.Reorder)
-	v1.Post("/profiles/me/links/:id/update", h.requireAuth, h.profiles.UpdateLink)
-	v1.Post("/profiles/me/links/:id/delete", h.requireAuth, h.profiles.DeleteLink)
+	v1.Post("/profiles", h.requireAuth, limitCreator, h.profiles.Create)
+	v1.Get("/profiles/me", h.requireAuth, limitCreator, h.profiles.Own)
+	v1.Post("/profiles/me/update", h.requireAuth, limitCreator, h.profiles.Update)
+	v1.Post("/profiles/me/links", h.requireAuth, limitCreator, h.profiles.AddLink)
+	v1.Post("/profiles/me/links/order", h.requireAuth, limitCreator, h.profiles.Reorder)
+	v1.Post("/profiles/me/links/:id/update", h.requireAuth, limitCreator, h.profiles.UpdateLink)
+	v1.Post("/profiles/me/links/:id/delete", h.requireAuth, limitCreator, h.profiles.DeleteLink)
 
-	v1.Post("/products", h.requireAuth, h.products.Create)
-	v1.Get("/products", h.requireAuth, h.products.List)
-	v1.Get("/products/:id", h.requireAuth, h.products.Get)
-	v1.Post("/products/:id/update", h.requireAuth, h.products.Update)
+	v1.Post("/products", h.requireAuth, limitCreator, h.products.Create)
+	v1.Get("/products", h.requireAuth, limitCreator, h.products.List)
+	v1.Get("/products/:id", h.requireAuth, limitCreator, h.products.Get)
+	v1.Post("/products/:id/update", h.requireAuth, limitCreator, h.products.Update)
 
 	// None of the upload routes carry a file body: the API hands out a signed URL
 	// and later asks S3 what happened. A 2 GB product never touches this process,
 	// which is what keeps its memory flat and its BodyLimit at 2 MB.
-	v1.Post("/products/:id/upload-url", h.requireAuth, h.products.RequestUpload)
-	v1.Post("/products/:id/files/:fileId/confirm", h.requireAuth, h.products.ConfirmUpload)
-	v1.Post("/products/:id/files/:fileId/delete", h.requireAuth, h.products.DeleteFile)
+	v1.Post("/products/:id/upload-url", h.requireAuth, limitCreator, h.products.RequestUpload)
+	v1.Post("/products/:id/files/:fileId/confirm", h.requireAuth, limitCreator, h.products.ConfirmUpload)
+	v1.Post("/products/:id/files/:fileId/delete", h.requireAuth, limitCreator, h.products.DeleteFile)
+
+	// The creator's own dashboard. No profile id anywhere in the request: the
+	// queries scope to whoever the token says is calling, so asking for someone
+	// else's numbers is unexpressible rather than merely forbidden.
+	v1.Get("/analytics/overview", h.requireAuth, limitCreator, h.analytics.Overview)
 
 	// ---------------------------------------------------------------- public
 	// The rest of the internet. Everything below is deliberately unauthenticated
@@ -120,21 +167,26 @@ func registerRoutes(app *fiber.App, h handlers) {
 	//
 	// The storefront is world-readable by design, which is why it returns its own
 	// response types rather than the owner-facing ones.
-	v1.Get("/public/:username", h.storefront.Page)
-	v1.Get("/public/:username/:slug", h.storefront.Product)
+	v1.Get("/public/:username", limitPublic, h.storefront.Page)
+	v1.Get("/public/:username/:slug", limitPublic, h.storefront.Product)
+
+	// Counts a click and 302s to the destination. Registered before the
+	// two-segment product route would ever be reached with three segments, so
+	// there is no ambiguity between /public/:username/:slug and this path.
+	v1.Get("/public/:username/links/:id/go", limitPublic, h.storefront.LinkClick)
 
 	// Checkout is public because buyers are guests: putting an account between a
 	// creator's audience and their Buy button is the fastest way to lose a sale.
 	// It is also the only unauthenticated route that writes, so it is the first
 	// one that needs per-IP rate limiting — which arrives with Redis in phase 11.
 	// Until then it is bounded only by maxItemsPerOrder and the body limit.
-	v1.Post("/orders", h.orders.Create)
+	v1.Post("/orders", limitCheckout, h.orders.Create)
 
 	// Secure delivery. Public because buyers are guests, and protected by two
 	// things the caller must already have: the order's unguessable uuid and the
 	// email that bought it. It hands back short-lived presigned S3 URLs — the
 	// file itself never passes through this process, in either direction.
-	v1.Post("/orders/:id/download", h.delivery.Download)
+	v1.Post("/orders/:id/download", limitDownload, h.delivery.Download)
 
 	// The payment webhook. Unauthenticated in the usual sense — Razorpay holds no
 	// token of ours — but not unauthenticated in effect: every request is

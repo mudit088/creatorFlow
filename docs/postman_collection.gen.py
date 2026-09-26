@@ -272,12 +272,75 @@ payment_items = [
         ])),
 ]
 
+# --------------------------------------------------------------- delivery
+delivery_items = [
+    req("Download (entitled buyer)", "POST", "/api/v1/orders/{{orderId}}/download",
+        body={"buyer_email": "buyer@example.com"}, auth=NO_AUTH,
+        desc="Returns a short-lived presigned S3 URL per file. The bytes never pass through the "
+             "API - it decides who may have the file and then steps out of the way. Access is read "
+             "from the entitlements table alone, which the webhook wrote in the same transaction "
+             "that marked the order paid. Run the URL from the response in a browser: it "
+             "downloads as the original filename, and expires after 5 minutes.",
+        scripts=test_script([
+            "pm.test('entitled', () => pm.response.to.have.status(200));",
+            "const body = pm.response.json();",
+            "if (body.files && body.files.length) {",
+            "    pm.collectionVariables.set('downloadUrl', body.files[0].url);",
+            "    pm.test('link expires quickly', () => pm.expect(body.files[0].expires_in).to.be.at.most(900));",
+            "}",
+        ])),
+    req("Download (wrong email, expect 404)", "POST", "/api/v1/orders/{{orderId}}/download",
+        body={"buyer_email": "attacker@evil.test"}, auth=NO_AUTH,
+        desc="Holding the order id is not enough. Note the response is identical to the one for an "
+             "order that does not exist - otherwise this endpoint would let anyone with a leaked "
+             "order id confirm who bought it.",
+        scripts=test_script([
+            "pm.test('refused', () => pm.response.to.have.status(404));",
+            "pm.test('reveals nothing', () => pm.expect(pm.response.json().error.code).to.eql('not_entitled'));",
+        ])),
+]
+
+# -------------------------------------------------------------- dashboard
+analytics_items = [
+    req("Overview (last 30 days)", "GET", "/api/v1/analytics/overview",
+        desc="The creator dashboard. Requires a token and takes no profile id: the queries scope "
+             "to whoever the token says is calling, so asking for another creator's numbers is "
+             "unexpressible rather than merely forbidden. Run this after the checkout and webhook "
+             "folders and the purchase will be in it. Note daily_visitor_total is the sum of each "
+             "day's unique visitors, not distinct people over the range - visitor hashes rotate at "
+             "midnight so the second number cannot be computed.",
+        scripts=test_script([
+            "pm.test('dashboard returns', () => pm.response.to.have.status(200));",
+            "const o = pm.response.json();",
+            "pm.test('one row per day', () => pm.expect(o.days.length).to.be.above(0));",
+            "pm.test('revenue is in minor units', () => pm.expect(o.revenue.revenue_minor).to.be.a('number'));",
+        ])),
+    req("Overview (explicit month)", "GET", "/api/v1/analytics/overview?from=2026-09-01&to=2026-10-01",
+        desc="Half-open range: from is inclusive, to is exclusive. That is what lets September and "
+             "October both be expressed without double-counting the 30th."),
+    req("Overview (absurd range, expect 422)", "GET",
+        "/api/v1/analytics/overview?from=1970-01-01&to=2026-12-31",
+        desc="Bounded at 366 days. Without the limit, one authenticated caller could turn the "
+             "dashboard into a repeatable full-table scan.",
+        scripts=test_script([
+            "pm.test('range is bounded', () => pm.response.to.have.status(422));",
+        ])),
+]
+
 cleanup_items = [
-    req("Delete file", "POST", "/api/v1/products/{{productId}}/files/{{fileId}}/delete",
-        desc="Runs last on purpose. It removes the row and the S3 object but does NOT un-publish "
-             "the product, so afterwards the product is published with nothing to deliver - and "
-             "checkout will refuse to sell it (422). Run this before Checkout and you will see "
-             "exactly that."),
+    req("Delete a sold file (expect 409)", "POST",
+        "/api/v1/products/{{productId}}/files/{{fileId}}/delete",
+        desc="Runs last on purpose, and is expected to be REFUSED. By this point the buyer above "
+             "has paid for this product and holds a live entitlement, so deleting the file would "
+             "destroy a purchase someone paid for. The API refuses with 409 file_sold and tells "
+             "the creator to archive the product instead. Delete the file BEFORE checkout (or "
+             "revoke the entitlement) and the same request returns 204 - and if it was the last "
+             "deliverable, the product drops back to draft so the storefront stops offering "
+             "something checkout would refuse to sell.",
+        scripts=test_script([
+            "pm.test('sold file is protected', () => pm.response.to.have.status(409));",
+            "pm.test('says why', () => pm.expect(pm.response.json().error.code).to.eql('file_sold'));",
+        ])),
 ]
 
 collection = {
@@ -309,6 +372,7 @@ collection = {
         {"key": "linkId", "value": ""},
         {"key": "orderId", "value": ""},
         {"key": "orderTotal", "value": ""},
+        {"key": "downloadUrl", "value": ""},
         {"key": "providerOrderId", "value": ""},
         {"key": "razorpayKeyId", "value": ""},
         {"key": "webhookSecret", "value": "", "type": "string"},
@@ -322,7 +386,9 @@ collection = {
         {"name": "4. Public storefront", "item": public_items},
         {"name": "5. Checkout", "item": order_items},
         {"name": "6. Payments webhook", "item": payment_items},
-        {"name": "7. Cleanup (run last)", "item": cleanup_items},
+        {"name": "7. Download", "item": delivery_items},
+        {"name": "8. Creator dashboard", "item": analytics_items},
+        {"name": "9. Cleanup (run last)", "item": cleanup_items},
     ],
 }
 

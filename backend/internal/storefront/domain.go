@@ -9,7 +9,11 @@
 // for Phase 11: one page, one key, one entry.
 package storefront
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/google/uuid"
+)
 
 // Creator is the public view of a profile. No id, no user_id, no is_published,
 // no timestamps. A visitor needs none of them.
@@ -20,6 +24,10 @@ type Creator struct {
 }
 
 type Link struct {
+	// ID is internal. It is not in the public response type, but the page needs
+	// it to build a click-tracking URL, and analytics needs it to record which
+	// link was clicked.
+	ID    uuid.UUID
 	Title string
 	URL   string
 }
@@ -35,6 +43,9 @@ type ProductSummary struct {
 // ProductDetail is the product's own page. It carries the creator so the page
 // can be rendered from one request rather than two.
 type ProductDetail struct {
+	// Internal, as on Page: the response type carries neither.
+	ProfileID   uuid.UUID
+	ProductID   uuid.UUID
 	Creator     Creator
 	Slug        string
 	Title       string
@@ -54,9 +65,13 @@ type Deliverable struct {
 }
 
 type Page struct {
-	Creator  Creator
-	Links    []Link
-	Products []ProductSummary
+	// ProfileID never reaches a client — pageResponse has no such field. It is
+	// here so the handler can record a view without a second lookup to turn the
+	// username back into an id.
+	ProfileID uuid.UUID
+	Creator   Creator
+	Links     []Link
+	Products  []ProductSummary
 }
 
 // ErrNotFound covers every miss this package can produce: no such creator, an

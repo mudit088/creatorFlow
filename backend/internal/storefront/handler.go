@@ -3,18 +3,44 @@ package storefront
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 
+	"github.com/mudit/creatorflow/backend/internal/analytics"
 	"github.com/mudit/creatorflow/backend/internal/httpx"
 )
 
-type Handler struct {
-	svc *Service
+// Recorder is declared here, where it is consumed: the storefront needs to
+// record that something was viewed and to derive a visitor pseudonym, and
+// nothing more. Keeping it an interface is also what lets these handlers be
+// exercised with recording switched off.
+//
+// Nothing on this interface returns an error, which is the contract: analytics
+// failing must never turn a working page into a broken one.
+type Recorder interface {
+	Record(ev analytics.Event)
+	VisitorHash(ip, userAgent string, day time.Time) string
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+type Handler struct {
+	svc      *Service
+	recorder Recorder
+}
+
+func NewHandler(svc *Service, recorder Recorder) *Handler {
+	return &Handler{svc: svc, recorder: recorder}
+}
+
+// visitor derives today's pseudonym for the caller.
+//
+// c.IP() is the peer address unless Fiber is configured to trust a proxy header,
+// which matters behind a load balancer: get that wrong and every visitor shares
+// the balancer's address and the unique count collapses to one. Worth revisiting
+// in phase 15, when there actually is a load balancer.
+func (h *Handler) visitor(c *fiber.Ctx) string {
+	return h.recorder.VisitorHash(c.IP(), c.Get("User-Agent"), time.Now().UTC())
 }
 
 type creatorResponse struct {
@@ -26,6 +52,8 @@ type creatorResponse struct {
 type linkResponse struct {
 	Title string `json:"title"`
 	URL   string `json:"url"`
+	// The path a client should actually link to, so the click is counted.
+	ClickURL string `json:"click_url"`
 }
 
 type productSummaryResponse struct {
@@ -65,7 +93,16 @@ func (h *Handler) Page(c *fiber.Ctx) error {
 
 	links := make([]linkResponse, 0, len(page.Links))
 	for _, l := range page.Links {
-		links = append(links, linkResponse{Title: l.Title, URL: l.URL})
+		links = append(links, linkResponse{
+			Title: l.Title,
+			URL:   l.URL,
+			// Two URLs on purpose. URL is the real destination, so a visitor can
+			// see where a link goes before clicking and a crawler can follow it;
+			// ClickURL is our redirect, which records the click and then sends
+			// them on. A page that only exposed the redirect would hide the
+			// destination from the person deciding whether to click.
+			ClickURL: "/api/v1/public/" + page.Creator.Username + "/links/" + l.ID.String() + "/go",
+		})
 	}
 
 	products := make([]productSummaryResponse, 0, len(page.Products))
@@ -74,6 +111,15 @@ func (h *Handler) Page(c *fiber.Ctx) error {
 			Slug: p.Slug, Title: p.Title, PriceMinor: p.PriceMinor, Currency: p.Currency,
 		})
 	}
+
+	// Recorded after the page was successfully assembled, so a 404 is not
+	// counted as a view. Record() returns immediately and never fails.
+	h.recorder.Record(analytics.Event{
+		ProfileID:    page.ProfileID,
+		Type:         analytics.EventProfileView,
+		VisitorHash:  h.visitor(c),
+		ReferrerHost: analytics.ReferrerHost(c.Get("Referer")),
+	})
 
 	return c.JSON(pageResponse{
 		Creator:  newCreatorResponse(page.Creator),
@@ -95,6 +141,15 @@ func (h *Handler) Product(c *fiber.Ctx) error {
 		})
 	}
 
+	productID := detail.ProductID
+	h.recorder.Record(analytics.Event{
+		ProfileID:    detail.ProfileID,
+		Type:         analytics.EventProductView,
+		VisitorHash:  h.visitor(c),
+		ProductID:    &productID,
+		ReferrerHost: analytics.ReferrerHost(c.Get("Referer")),
+	})
+
 	return c.JSON(productDetailResponse{
 		Creator:     newCreatorResponse(detail.Creator),
 		Slug:        detail.Slug,
@@ -115,4 +170,39 @@ func mapError(err error) error {
 
 func newCreatorResponse(c Creator) creatorResponse {
 	return creatorResponse{Username: c.Username, DisplayName: c.DisplayName, Bio: c.Bio}
+}
+
+// LinkClick records a click and forwards the visitor to the destination.
+//
+// A redirect rather than a client-side beacon. A beacon needs JavaScript, is
+// blocked by every content blocker, and would mean another public write endpoint
+// for anyone to spam. A redirect is counted server-side, works with JS disabled,
+// and cannot be suppressed by the visitor's browser.
+//
+// What it costs, plainly: one extra hop before the destination loads, and the
+// destination sees our domain in its Referer rather than the original page.
+func (h *Handler) LinkClick(c *fiber.Ctx) error {
+	linkID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return httpx.New(http.StatusBadRequest, "invalid_link_id", "That link id is not a valid identifier.")
+	}
+
+	username := c.Params("username")
+	profileID, target, err := h.svc.LinkTarget(c.Context(), username, linkID)
+	if err != nil {
+		return mapError(err)
+	}
+
+	h.recorder.Record(analytics.Event{
+		ProfileID:    profileID,
+		Type:         analytics.EventLinkClick,
+		VisitorHash:  h.visitor(c),
+		LinkID:       &linkID,
+		ReferrerHost: analytics.ReferrerHost(c.Get("Referer")),
+	})
+
+	// 302, not 301. A permanent redirect is cached by the browser forever, so
+	// every later click would skip this endpoint entirely and go uncounted — and
+	// the creator could never change where the link points.
+	return c.Redirect(target, http.StatusFound)
 }

@@ -63,6 +63,10 @@ var (
 	ErrUploadMissing   = errors.New("no uploaded object found for this file")
 	ErrUploadMismatch  = errors.New("uploaded object does not match what was declared")
 	ErrAlreadyUploaded = errors.New("this file was already confirmed")
+	// ErrFileSold protects a buyer's purchase from the seller. A creator may add
+	// files to a sold product, and may archive the product so nobody buys it
+	// again, but may not remove what someone already paid for.
+	ErrFileSold = errors.New("this file has been purchased and cannot be deleted")
 )
 
 const (

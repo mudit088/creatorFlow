@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -14,7 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/mudit/creatorflow/backend/internal/analytics"
 	"github.com/mudit/creatorflow/backend/internal/auth"
+	"github.com/mudit/creatorflow/backend/internal/cache"
 	"github.com/mudit/creatorflow/backend/internal/config"
 	"github.com/mudit/creatorflow/backend/internal/database"
 	"github.com/mudit/creatorflow/backend/internal/delivery"
@@ -60,7 +64,14 @@ func run() error {
 	}
 	defer func() { _ = cache.Close() }()
 
-	app, err := newServer(cfg, pool, cache)
+	// Analytics owns a worker goroutine draining a bounded queue. It is closed
+	// after the HTTP server has drained — this defer runs once run() returns,
+	// which is after ShutdownWithContext — so nothing new is queued while it
+	// flushes what is left.
+	analyticsSvc := analytics.NewService(analytics.NewRepository(pool), analyticsSalt(cfg))
+	defer analyticsSvc.Close()
+
+	app, err := newServer(cfg, pool, cache, analyticsSvc)
 	if err != nil {
 		return err
 	}
@@ -85,7 +96,29 @@ func run() error {
 	}
 }
 
-func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fiber.App, error) {
+// analyticsSalt returns the configured salt, or a random one for development.
+//
+// A per-process random salt means visitor counts reset on restart, which is
+// wrong but harmless locally and strictly better than the alternative: a
+// hard-coded default would be identical on every deployment that forgot to set
+// one, and a known salt makes the visitor hashes reversible. Production refuses
+// to start without a real value, so this branch is development-only by
+// construction.
+func analyticsSalt(cfg *config.Config) string {
+	if cfg.AnalyticsSalt != "" {
+		return cfg.AnalyticsSalt
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failing is not a condition worth degrading for.
+		panic("cannot generate analytics salt: " + err.Error())
+	}
+	slog.Warn("ANALYTICS_SALT is not set; using a random per-process salt, so visitor counts reset on restart")
+	return hex.EncodeToString(buf)
+}
+
+func newServer(cfg *config.Config, pool *pgxpool.Pool, rdb *redis.Client, analyticsSvc *analytics.Service) (*fiber.App, error) {
 	app := fiber.New(fiber.Config{
 		AppName:               "creatorflow-api",
 		ErrorHandler:          httpx.ErrorHandler,
@@ -125,6 +158,10 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fi
 	// descriptors under load.
 	objectStore := storage.New(cfg)
 
+	// One cache client. The storefront reads through it; profiles and products
+	// write through its invalidation hooks, which is why it is built before them.
+	pageCache := cache.New(rdb)
+
 	// One Razorpay client for the process, holding both secrets. When the keys
 	// are absent — the normal state on a laptop — it reports itself disabled and
 	// checkout still works end to end, minus the payment itself.
@@ -133,9 +170,14 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fi
 		slog.Warn("razorpay is not configured: orders will be created without a provider order and cannot be paid")
 	}
 
+	// Built once and shared: the storefront both serves cached pages and owns the
+	// invalidation the writers call, so there is exactly one place that knows
+	// how a cache key is spelled.
+	storefrontSvc := storefront.NewService(storefront.NewRepository(pool), pageCache)
+
 	live, ready := newProbes(cfg.AppEnv,
 		pool.Ping,
-		func(ctx context.Context) error { return cache.Ping(ctx).Err() },
+		func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 	)
 
 	// Construction happens here; the URL-to-handler mapping lives in routes.go.
@@ -150,16 +192,20 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, cache *redis.Client) (*fi
 			Secure: cfg.IsProduction(),
 			MaxAge: cfg.RefreshTokenTTL,
 		}),
-		profiles:   profiles.NewHandler(profiles.NewService(profiles.NewRepository(pool))),
-		products:   products.NewHandler(products.NewService(products.NewRepository(pool), objectStore)),
-		storefront: storefront.NewHandler(storefront.NewService(storefront.NewRepository(pool))),
+		profiles:   profiles.NewHandler(profiles.NewService(profiles.NewRepository(pool), storefrontSvc)),
+		products:   products.NewHandler(products.NewService(products.NewRepository(pool), objectStore, storefrontSvc)),
+		storefront: storefront.NewHandler(storefrontSvc, analyticsSvc),
 		orders:     orders.NewHandler(orders.NewService(orders.NewRepository(pool), razorpayClient)),
 		payments:   payments.NewHandler(payments.NewService(payments.NewRepository(pool), razorpayClient)),
 		delivery:   delivery.NewHandler(delivery.NewService(delivery.NewRepository(pool), objectStore)),
+		analytics:  analytics.NewHandler(analyticsSvc),
 
 		requireAuth: middleware.RequireAuth(tokens, httpx.ErrUnauthorized),
-		live:        live,
-		ready:       ready,
+		// Backed by the same Redis the cache uses. It fails open, so a Redis
+		// outage costs protection rather than availability.
+		limiter: middleware.NewRateLimiter(rdb),
+		live:    live,
+		ready:   ready,
 	})
 
 	return app, nil

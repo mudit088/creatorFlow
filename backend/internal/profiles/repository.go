@@ -141,3 +141,16 @@ func (r *Repository) LockProfile(ctx context.Context, userID uuid.UUID) (uuid.UU
 	}
 	return id, nil
 }
+
+// UsernameForUser is used only for cache invalidation: link mutations know the
+// caller but not the public handle whose page has to be dropped. One indexed
+// lookup on a write path, which is the cheap half of a read-heavy system.
+func (r *Repository) UsernameForUser(ctx context.Context, userID uuid.UUID) (string, error) {
+	const q = `SELECT username FROM profiles WHERE user_id = $1`
+
+	var username string
+	if err := r.db.QueryRow(ctx, q, userID).Scan(&username); err != nil {
+		return "", fmt.Errorf("username for user: %w", err)
+	}
+	return username, nil
+}

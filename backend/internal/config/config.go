@@ -35,6 +35,11 @@ type Config struct {
 	AccessTokenTTL   time.Duration
 	RefreshTokenTTL  time.Duration
 
+	// AnalyticsSalt is mixed into every visitor hash. Rotating it makes all
+	// existing pseudonyms unlinkable from new ones, which is a privacy feature
+	// rather than a migration problem: the counts already recorded stay valid.
+	AnalyticsSalt string
+
 	RazorpayKeyID         string
 	RazorpayKeySecret     string
 	RazorpayWebhookSecret string
@@ -81,6 +86,8 @@ func Load() (*Config, error) {
 		AccessTokenTTL:   optionalDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL:  optionalDuration("REFRESH_TOKEN_TTL", 720*time.Hour),
 
+		AnalyticsSalt: optional("ANALYTICS_SALT", ""),
+
 		RazorpayKeyID:         optional("RAZORPAY_KEY_ID", ""),
 		RazorpayKeySecret:     optional("RAZORPAY_KEY_SECRET", ""),
 		RazorpayWebhookSecret: optional("RAZORPAY_WEBHOOK_SECRET", ""),
@@ -99,6 +106,12 @@ func Load() (*Config, error) {
 		}
 		if cfg.RazorpayWebhookSecret == "" {
 			return nil, fmt.Errorf("refusing to start: RAZORPAY_WEBHOOK_SECRET is required in production")
+		}
+		// Without a stable salt, every restart invents a new one and the same
+		// visitor is counted again — so production refuses to start rather than
+		// quietly reporting inflated numbers.
+		if cfg.AnalyticsSalt == "" {
+			return nil, fmt.Errorf("refusing to start: ANALYTICS_SALT is required in production")
 		}
 	}
 

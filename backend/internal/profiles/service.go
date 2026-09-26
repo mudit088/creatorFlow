@@ -9,12 +9,37 @@ import (
 	"github.com/google/uuid"
 )
 
-type Service struct {
-	repo *Repository
+// Invalidator is the storefront cache, declared here as the one thing this
+// package needs from it. Nothing on it returns an error: a failed invalidation
+// means a page stays stale until its TTL expires, which is not a reason to fail
+// the edit that succeeded.
+type Invalidator interface {
+	InvalidateProfile(ctx context.Context, username string)
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+type Service struct {
+	repo  *Repository
+	cache Invalidator
+}
+
+func NewService(repo *Repository, cache Invalidator) *Service {
+	return &Service{repo: repo, cache: cache}
+}
+
+// invalidate drops the caller's public page from the cache.
+//
+// Called after a successful write, never before: invalidating first would let a
+// concurrent read repopulate the cache from the pre-write state, which is the
+// classic way a cache-aside system ends up permanently stale.
+func (s *Service) invalidate(ctx context.Context, userID uuid.UUID) {
+	if s.cache == nil {
+		return
+	}
+	username, err := s.repo.UsernameForUser(ctx, userID)
+	if err != nil || username == "" {
+		return
+	}
+	s.cache.InvalidateProfile(ctx, username)
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, username, displayName string) (*Profile, error) {
@@ -65,7 +90,12 @@ func (s *Service) Update(ctx context.Context, userID uuid.UUID, displayName, bio
 		bio = &trimmed
 	}
 
-	return s.repo.UpdateProfile(ctx, userID, displayName, bio, isPublished)
+	profile, err := s.repo.UpdateProfile(ctx, userID, displayName, bio, isPublished)
+	if err != nil {
+		return nil, err
+	}
+	s.invalidate(ctx, userID)
+	return profile, nil
 }
 
 // AddLink locks the profile, counts, then inserts, all in one transaction.
@@ -106,6 +136,7 @@ func (s *Service) AddLink(ctx context.Context, userID uuid.UUID, title, linkURL 
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	return created, nil
 }
 
@@ -129,7 +160,12 @@ func (s *Service) UpdateLink(ctx context.Context, userID, linkID uuid.UUID, titl
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.UpdateLink(ctx, profile.ID, linkID, title, linkURL, isActive)
+	link, err := s.repo.UpdateLink(ctx, profile.ID, linkID, title, linkURL, isActive)
+	if err != nil {
+		return nil, err
+	}
+	s.invalidate(ctx, userID)
+	return link, nil
 }
 
 func (s *Service) DeleteLink(ctx context.Context, userID, linkID uuid.UUID) error {
@@ -137,7 +173,11 @@ func (s *Service) DeleteLink(ctx context.Context, userID, linkID uuid.UUID) erro
 	if err != nil {
 		return err
 	}
-	return s.repo.DeleteLink(ctx, profile.ID, linkID)
+	if err := s.repo.DeleteLink(ctx, profile.ID, linkID); err != nil {
+		return err
+	}
+	s.invalidate(ctx, userID)
+	return nil
 }
 
 // Reorder demands the complete list, not a subset. Renumbering only some links
@@ -184,6 +224,7 @@ func (s *Service) Reorder(ctx context.Context, userID uuid.UUID, ids []uuid.UUID
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	return ordered, nil
 }
 

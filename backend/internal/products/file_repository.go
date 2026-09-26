@@ -130,3 +130,42 @@ func (r *Repository) DeleteFile(ctx context.Context, fileID uuid.UUID) error {
 	}
 	return nil
 }
+
+// HasLiveEntitlements answers whether anyone has bought this product and still
+// has the right to download it.
+//
+// This package reading the entitlements table is a deliberate exception to
+// keeping features apart, and the alternative was worse: importing the delivery
+// or payments package here would make products depend on the thing that depends
+// on products. The rule it enforces belongs to whoever deletes files, so the
+// query lives where the deletion happens.
+//
+// Revoked entitlements do not count. A refunded buyer has no claim on the file,
+// so a creator should still be able to tidy it up.
+func (r *Repository) HasLiveEntitlements(ctx context.Context, productID uuid.UUID) (bool, error) {
+	const q = `
+		SELECT EXISTS (
+		    SELECT 1 FROM entitlements
+		    WHERE product_id = $1 AND revoked_at IS NULL
+		)`
+
+	var exists bool
+	if err := r.db.QueryRow(ctx, q, productID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check entitlements: %w", err)
+	}
+	return exists, nil
+}
+
+// Unpublish returns a product to draft. Used when its last deliverable file is
+// removed: the paired CHECK constraint requires published_at to be NULL whenever
+// the status is not published, so both columns move together or neither does.
+func (r *Repository) Unpublish(ctx context.Context, productID uuid.UUID) error {
+	const q = `
+		UPDATE products SET status = 'draft', published_at = NULL
+		WHERE id = $1 AND status = 'published'`
+
+	if _, err := r.db.Exec(ctx, q, productID); err != nil {
+		return fmt.Errorf("unpublish product: %w", err)
+	}
+	return nil
+}

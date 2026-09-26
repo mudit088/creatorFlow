@@ -43,7 +43,7 @@ func (r *Repository) FindCreator(ctx context.Context, username string) (uuid.UUI
 
 func (r *Repository) ListLinks(ctx context.Context, profileID uuid.UUID) ([]Link, error) {
 	const q = `
-		SELECT title, url FROM links
+		SELECT id, title, url FROM links
 		WHERE profile_id = $1 AND is_active
 		ORDER BY position`
 
@@ -56,7 +56,7 @@ func (r *Repository) ListLinks(ctx context.Context, profileID uuid.UUID) ([]Link
 	out := make([]Link, 0)
 	for rows.Next() {
 		var l Link
-		if err := rows.Scan(&l.Title, &l.URL); err != nil {
+		if err := rows.Scan(&l.ID, &l.Title, &l.URL); err != nil {
 			return nil, fmt.Errorf("scan public link: %w", err)
 		}
 		out = append(out, l)
@@ -119,6 +119,9 @@ func (r *Repository) FindProduct(ctx context.Context, username, slug string) (uu
 	if err != nil {
 		return uuid.Nil, nil, fmt.Errorf("find public product: %w", err)
 	}
+	// Carried on the struct so the handler can record a view without turning the
+	// username back into an id a second time.
+	d.ProfileID = profileID
 	return productID, &d, nil
 }
 
@@ -147,4 +150,29 @@ func (r *Repository) ListDeliverables(ctx context.Context, productID uuid.UUID) 
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// FindLinkTarget resolves a click to its destination.
+//
+// Every visibility rule is in the WHERE clause, as with the rest of this
+// package: the link must be active and belong to a published profile with this
+// username. A link on an unpublished page, or one id pasted under another
+// creator's handle, matches nothing and is reported as not found.
+func (r *Repository) FindLinkTarget(ctx context.Context, username string, linkID uuid.UUID) (uuid.UUID, string, error) {
+	const q = `
+		SELECT p.id, l.url
+		FROM links l
+		JOIN profiles p ON p.id = l.profile_id
+		WHERE l.id = $2 AND p.username = $1 AND p.is_published AND l.is_active`
+
+	var profileID uuid.UUID
+	var target string
+	err := r.db.QueryRow(ctx, q, username, linkID).Scan(&profileID, &target)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, "", ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, "", fmt.Errorf("find link target: %w", err)
+	}
+	return profileID, target, nil
 }

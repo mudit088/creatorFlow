@@ -253,6 +253,9 @@ func mapError(err error) error {
 		return httpx.New(http.StatusConflict, "upload_missing", "No uploaded file was found. Complete the upload and try again.")
 	case errors.Is(err, ErrUploadMismatch):
 		return httpx.New(http.StatusConflict, "upload_mismatch", "The uploaded file does not match what was declared.")
+	case errors.Is(err, ErrFileSold):
+		return httpx.New(http.StatusConflict, "file_sold",
+			"Someone has already bought this file, so it cannot be deleted. Archive the product instead.")
 	case errors.Is(err, ErrAlreadyUploaded):
 		return httpx.New(http.StatusConflict, "already_confirmed", "That upload was already confirmed.")
 	default:

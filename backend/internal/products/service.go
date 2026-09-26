@@ -21,13 +21,37 @@ type ObjectStore interface {
 	DeleteObject(ctx context.Context, key string) error
 }
 
+// Invalidator is the storefront cache. As in the profiles package, nothing on
+// it returns an error: a stale page for a few minutes is not a reason to fail a
+// write that already succeeded.
+type Invalidator interface {
+	InvalidateProduct(ctx context.Context, username, slug string)
+}
+
 type Service struct {
 	repo  *Repository
 	store ObjectStore
+	cache Invalidator
 }
 
-func NewService(repo *Repository, store ObjectStore) *Service {
-	return &Service{repo: repo, store: store}
+func NewService(repo *Repository, store ObjectStore, cache Invalidator) *Service {
+	return &Service{repo: repo, store: store, cache: cache}
+}
+
+// invalidate drops the product page and the creator page that lists it.
+//
+// After the write, never before: dropping the entry first leaves a window in
+// which a concurrent reader repopulates the cache from the old row, and the
+// stale value then survives until its TTL rather than until the next edit.
+func (s *Service) invalidate(ctx context.Context, productID uuid.UUID) {
+	if s.cache == nil {
+		return
+	}
+	username, slug, err := s.repo.PublicCoords(ctx, productID)
+	if err != nil || username == "" {
+		return
+	}
+	s.cache.InvalidateProduct(ctx, username, slug)
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, slug, title string, description *string, priceMinor int64) (*Product, error) {
@@ -44,7 +68,12 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, slug, title stri
 		return nil, err
 	}
 
-	return s.repo.Create(ctx, userID, slug, title, description, priceMinor)
+	product, err := s.repo.Create(ctx, userID, slug, title, description, priceMinor)
+	if err != nil {
+		return nil, err
+	}
+	s.invalidate(ctx, product.ID)
+	return product, nil
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID) ([]Product, error) {
@@ -124,6 +153,12 @@ func (s *Service) Update(ctx context.Context, userID, productID uuid.UUID, title
 	if err != nil {
 		return nil, err
 	}
+	// Invalidated by id rather than by the slug from the request, because the
+	// update may have changed the slug — and the entry that needs dropping is
+	// the one under the OLD one too. PublicCoords reads the row after the write,
+	// so the new page is refreshed; the old slug's entry expires on its TTL,
+	// which is correct since that URL now 404s anyway.
+	s.invalidate(ctx, updated.ID)
 	return updated, nil
 }
 
@@ -223,7 +258,13 @@ func (s *Service) ConfirmUpload(ctx context.Context, userID, productID, fileID u
 		return nil, ErrUploadMismatch
 	}
 
-	return s.repo.ConfirmFile(ctx, file.ID, info.Size, strings.Trim(info.ETag, `"`))
+	confirmed, err := s.repo.ConfirmFile(ctx, file.ID, info.Size, strings.Trim(info.ETag, `"`))
+	if err != nil {
+		return nil, err
+	}
+	// A confirmed file changes what the public product page lists as included.
+	s.invalidate(ctx, productID)
+	return confirmed, nil
 }
 
 // DeleteFile removes the row first and the object second.
@@ -234,16 +275,66 @@ func (s *Service) ConfirmUpload(ctx context.Context, userID, productID, fileID u
 // a buyer discovers at download time. When two systems cannot be updated
 // atomically, choose the failure mode that costs money over the one that breaks
 // a promise.
+// DeleteFile removes a file, unless someone has already bought it.
+//
+// Two invariants live here, both of which span tables and so cannot be CHECK
+// constraints:
+//
+//  1. A file behind a live entitlement cannot be deleted. Someone paid for it,
+//     their entitlement stays valid, and deleting the object would leave them
+//     holding a receipt for a 404. Deletion is refused rather than cascaded.
+//  2. Removing the last deliverable un-publishes the product. Otherwise the
+//     storefront keeps offering something checkout would then refuse to sell,
+//     which reads to a creator as a broken Buy button rather than as their own
+//     earlier deletion.
+//
+// The S3 object is deleted after the transaction commits, never before. If it
+// went first and the transaction then rolled back, the row would survive
+// pointing at bytes that no longer exist — a file that looks deliverable and is
+// not. This way the worst case is an orphaned object, which costs storage and
+// can be swept up, rather than a lie in the database.
 func (s *Service) DeleteFile(ctx context.Context, userID, productID, fileID uuid.UUID) error {
-	file, err := s.repo.FindFileForUser(ctx, userID, productID, fileID)
+	var key string
+
+	err := s.repo.InTx(ctx, func(r *Repository) error {
+		file, err := r.FindFileForUser(ctx, userID, productID, fileID)
+		if err != nil {
+			return err
+		}
+
+		sold, err := r.HasLiveEntitlements(ctx, productID)
+		if err != nil {
+			return err
+		}
+		if sold {
+			return ErrFileSold
+		}
+
+		if err := r.DeleteFile(ctx, file.ID); err != nil {
+			return err
+		}
+
+		remaining, err := r.CountConfirmedFiles(ctx, productID)
+		if err != nil {
+			return err
+		}
+		if remaining == 0 {
+			// A no-op unless the product was published, so a draft losing its
+			// last file simply stays a draft.
+			if err := r.Unpublish(ctx, productID); err != nil {
+				return err
+			}
+		}
+
+		key = file.S3Key
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 
-	if err := s.repo.DeleteFile(ctx, file.ID); err != nil {
-		return err
-	}
-	return s.store.DeleteObject(ctx, file.S3Key)
+	s.invalidate(ctx, productID)
+	return s.store.DeleteObject(ctx, key)
 }
 
 type ValidationError struct {

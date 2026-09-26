@@ -161,6 +161,13 @@ func (s *Service) apply(ctx context.Context, tx *Repository, event Event) outcom
 		return retry(err)
 	}
 
+	// Analytics, in the same transaction. A failure here is logged rather than
+	// returned: a sale that was not counted is a reporting gap, while rolling
+	// back a settled payment over one would be a catastrophe.
+	if err := tx.RecordPurchaseEvents(ctx, order.ID); err != nil {
+		slog.Warn("order settled but purchase event not recorded", "order_id", order.ID, "error", err)
+	}
+
 	slog.Info("order settled",
 		"order_id", order.ID, "payment_id", entity.ID,
 		"amount_minor", entity.Amount, "entitlements_granted", granted)

@@ -156,3 +156,30 @@ func (r *Repository) GrantEntitlements(ctx context.Context, orderID uuid.UUID) (
 	}
 	return tag.RowsAffected(), nil
 }
+
+// RecordPurchaseEvents writes one analytics row per product in the order.
+//
+// This package inserting into the events table is deliberate, and the reason is
+// the transaction: the purchase event has to be written by the same commit that
+// marks the order paid, or a crash in between leaves revenue that the dashboard
+// cannot see. Going through the analytics service instead would mean an async
+// queue and a different transaction — right for a page view that nobody will
+// miss, wrong for money.
+//
+// Derived entirely from rows the database already holds, so nothing a webhook
+// claimed can influence what gets attributed to whom. Best-effort by design:
+// the caller ignores the error, because failing to count a sale must never undo
+// a payment.
+func (r *Repository) RecordPurchaseEvents(ctx context.Context, orderID uuid.UUID) error {
+	const q = `
+		INSERT INTO events (profile_id, event_type, product_id, order_id, occurred_at)
+		SELECT o.profile_id, 'purchase', i.product_id, o.id, now()
+		FROM orders o
+		JOIN order_items i ON i.order_id = o.id
+		WHERE o.id = $1`
+
+	if _, err := r.db.Exec(ctx, q, orderID); err != nil {
+		return fmt.Errorf("record purchase events: %w", err)
+	}
+	return nil
+}
