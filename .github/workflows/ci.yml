@@ -81,13 +81,15 @@ jobs:
 
       - run: go vet ./...
 
-      - uses: golangci/golangci-lint-action@v6
+      # v8 of the action drives golangci-lint v2. The v6 action drives v1, whose
+      # config schema and CLI flags differ — pointing it at a `version: "2"`
+      # config fails before it lints anything.
+      - uses: golangci/golangci-lint-action@v8
         with:
           working-directory: backend
-          # Tracks the Go release rather than being pinned: a linter built
-          # against an older toolchain refuses to analyse newer code, which is
-          # how this job silently stops checking anything.
-          version: latest
+          # The exact version verified locally against this code. Pinned because
+          # a linter that changes underneath CI turns an unrelated push red.
+          version: v2.14.0
 
       - run: go build ./...
 
@@ -95,7 +97,11 @@ jobs:
       # schema, so CI applies them exactly as a deployment would instead of
       # loading a dump that can drift from them.
       - name: Install golang-migrate
-        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.1
+        run: |
+          go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.1
+          # go install writes to GOPATH/bin, which later steps do not
+          # necessarily have on PATH.
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Apply migrations
         run: migrate -path ./migrations -database "$DATABASE_URL" up
@@ -148,6 +154,12 @@ jobs:
       # The prod target specifically. The dev target carries air and the migrate
       # CLI; what ships must be the small non-root image, not the one that is
       # convenient locally.
+      # Creates a docker-container builder. Without this the default builder
+      # uses the docker driver, which cannot export a cache — which is exactly
+      # what `cache-to: type=gha` asks it to do, and why the build failed with a
+      # link to the build-cache-backends docs.
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build production image
         uses: docker/build-push-action@v6
         with:
