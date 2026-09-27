@@ -23,6 +23,7 @@ import (
 	"github.com/mudit/creatorflow/backend/internal/database"
 	"github.com/mudit/creatorflow/backend/internal/delivery"
 	"github.com/mudit/creatorflow/backend/internal/httpx"
+	"github.com/mudit/creatorflow/backend/internal/jobs"
 	"github.com/mudit/creatorflow/backend/internal/middleware"
 	"github.com/mudit/creatorflow/backend/internal/orders"
 	"github.com/mudit/creatorflow/backend/internal/payments"
@@ -71,7 +72,17 @@ func run() error {
 	analyticsSvc := analytics.NewService(analytics.NewRepository(pool), analyticsSalt(cfg))
 	defer analyticsSvc.Close()
 
-	app, err := newServer(cfg, pool, cache, analyticsSvc)
+	// Periodic cleanup. Started before the server and stopped after it, so a job
+	// mid-batch is allowed to finish rather than being killed by the shutdown
+	// that drained the HTTP traffic.
+	// One S3 client for the process: it holds credentials and pooled
+	// connections, so both the request path and the cleanup job share it.
+	objectStore := storage.New(cfg)
+
+	cleanupRunner := startJobs(ctx, pool, cache, objectStore)
+	defer cleanupRunner.Stop()
+
+	app, err := newServer(cfg, pool, cache, analyticsSvc, objectStore)
 	if err != nil {
 		return err
 	}
@@ -104,6 +115,37 @@ func run() error {
 // one, and a known salt makes the visitor hashes reversible. Production refuses
 // to start without a real value, so this branch is development-only by
 // construction.
+// startJobs registers the periodic work and launches it.
+//
+// The intervals are not synchronised with the thresholds they enforce: orders
+// expire after 24 hours but the job looks every 10 minutes, because the cost of
+// checking is one indexed query and the benefit is that a threshold change takes
+// effect promptly rather than a day later.
+func startJobs(ctx context.Context, pool *pgxpool.Pool, rdb *redis.Client, store *storage.Client) *jobs.Runner {
+	cleanup := jobs.NewCleanup(pool)
+	cleanup.DeleteObject = store.DeleteObject
+
+	runner := jobs.New(rdb)
+	runner.Add(jobs.Job{
+		Name: "expire_pending_orders", Interval: 10 * time.Minute, Timeout: 2 * time.Minute,
+		Run: cleanup.ExpirePendingOrders,
+	})
+	runner.Add(jobs.Job{
+		Name: "sweep_abandoned_uploads", Interval: time.Hour, Timeout: 5 * time.Minute,
+		Run: cleanup.SweepAbandonedUploads,
+	})
+	// Daily: retention is measured in months, so checking more often would be
+	// work with nothing to find.
+	runner.Add(jobs.Job{
+		Name: "delete_expired_analytics", Interval: 24 * time.Hour, Timeout: 10 * time.Minute,
+		Run: cleanup.DeleteExpiredAnalytics,
+	})
+
+	runner.Start(ctx)
+	slog.Info("background jobs started", "jobs", 3)
+	return runner
+}
+
 func analyticsSalt(cfg *config.Config) string {
 	if cfg.AnalyticsSalt != "" {
 		return cfg.AnalyticsSalt
@@ -118,19 +160,37 @@ func analyticsSalt(cfg *config.Config) string {
 	return hex.EncodeToString(buf)
 }
 
-func newServer(cfg *config.Config, pool *pgxpool.Pool, rdb *redis.Client, analyticsSvc *analytics.Service) (*fiber.App, error) {
+func newServer(cfg *config.Config, pool *pgxpool.Pool, rdb *redis.Client, analyticsSvc *analytics.Service, objectStore *storage.Client) (*fiber.App, error) {
+	// Behind a load balancer the peer address is the balancer, not the visitor.
+	// Every rate limit bucket would then be shared by everyone, and the unique
+	// visitor count would collapse to one.
+	//
+	// The fix is not "read X-Forwarded-For" — that header is written by the
+	// client and can say anything, so believing it unconditionally is worse than
+	// ignoring it: one script could present a new address per request and walk
+	// through every limit here. Fiber is told which peers are allowed to set it,
+	// and trusts the header only from them. With TRUSTED_PROXIES empty, as it is
+	// locally, nothing is trusted and c.IP() stays the peer address.
+	trustProxies := len(cfg.TrustedProxies) > 0
+
 	app := fiber.New(fiber.Config{
-		AppName:               "creatorflow-api",
-		ErrorHandler:          httpx.ErrorHandler,
-		DisableStartupMessage: true,
-		ReadTimeout:           10 * time.Second,
-		WriteTimeout:          20 * time.Second,
-		IdleTimeout:           60 * time.Second,
-		BodyLimit:             2 * 1024 * 1024, // large files go to S3, never through here
+		AppName:                 "creatorflow-api",
+		EnableTrustedProxyCheck: trustProxies,
+		TrustedProxies:          cfg.TrustedProxies,
+		ProxyHeader:             proxyHeader(trustProxies),
+		ErrorHandler:            httpx.ErrorHandler,
+		DisableStartupMessage:   true,
+		ReadTimeout:             10 * time.Second,
+		WriteTimeout:            20 * time.Second,
+		IdleTimeout:             60 * time.Second,
+		BodyLimit:               2 * 1024 * 1024, // large files go to S3, never through here
 	})
 
 	app.Use(recover.New())
 	app.Use(middleware.RequestID())
+	// Before CORS and before any route: these apply to every response this
+	// process produces, including the ones the error handler writes.
+	app.Use(middleware.SecurityHeaders(cfg.IsProduction()))
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: joinOrigins(cfg.CORSAllowedOrigins),
 		// The API speaks GET and POST only, so nothing else is advertised.
@@ -152,11 +212,6 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, rdb *redis.Client, analyt
 	if err != nil {
 		return nil, err
 	}
-
-	// One S3 client for the process. It holds credentials and connection reuse,
-	// so building one per request would be both slower and a way to leak file
-	// descriptors under load.
-	objectStore := storage.New(cfg)
 
 	// One cache client. The storefront reads through it; profiles and products
 	// write through its invalidation hooks, which is why it is built before them.
@@ -209,6 +264,19 @@ func newServer(cfg *config.Config, pool *pgxpool.Pool, rdb *redis.Client, analyt
 	})
 
 	return app, nil
+}
+
+// proxyHeader returns the header Fiber should read the client address from, and
+// only when a trusted proxy is configured. Returning it unconditionally would
+// make the trust check pointless.
+func proxyHeader(trustProxies bool) string {
+	if !trustProxies {
+		return ""
+	}
+	// X-Forwarded-For rather than X-Real-IP: it is what an AWS ALB, CloudFront
+	// and nginx all set by default, and Fiber takes the left-most entry that a
+	// trusted hop did not add.
+	return fiber.HeaderXForwardedFor
 }
 
 func newLogger(cfg *config.Config) *slog.Logger {

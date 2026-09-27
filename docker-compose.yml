@@ -70,6 +70,12 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-creatorflow}:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/${POSTGRES_DB:-creatorflow}?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
+      # What the API calls; what a browser is given. Inside Compose the API
+      # reaches MinIO as "minio", a hostname that means nothing on the host, so
+      # presigned URLs must be signed against localhost or the browser cannot
+      # fetch them. The signature covers the host, so this cannot be patched up
+      # after signing.
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
     ports:
       - "${API_PORT:-8080}:8080"
     volumes:

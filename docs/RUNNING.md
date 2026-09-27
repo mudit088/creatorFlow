@@ -156,6 +156,143 @@ The hostname changes every restart, so the dashboard URL needs updating each
 session. The tunnel also exposes the *whole* API publicly, including
 `/auth/register` — shut it down when you are finished.
 
+## 7. Background jobs
+
+Three jobs run inside the API process, each behind a Redis lock so that only one
+instance does the work when several are running:
+
+| Job | Interval | What it does |
+|---|---|---|
+| `expire_pending_orders` | 10 min | Cancels unpaid orders older than 24h (cancelled, not deleted) |
+| `sweep_abandoned_uploads` | 1 hour | Deletes file rows whose upload was never confirmed, plus the S3 object |
+| `delete_expired_analytics` | 24 hours | Deletes events and visitors past `RetentionDays` (90) |
+
+The first run of each is delayed by a random fraction of its interval, so a
+freshly started fleet does not contend for the same lock at the same instant.
+That means after a restart you may wait up to half an interval before seeing
+anything. To watch them:
+
+```powershell
+$env:LOG_LEVEL = "debug"   # they log at debug when they find nothing to do
+go run ./cmd/api
+```
+
+Every delete is batched (5000 rows, at most 20 batches per run) and stops at a
+batch boundary when the process is shutting down, so a job that has fallen
+behind never takes a long lock or a large transaction.
+
+To see the locks while a job is running:
+
+```bash
+docker exec cf_redis redis-cli --scan --pattern 'jobs:lock:*'
+```
+
+## 8. Rate limits
+
+Enforced in Redis, fixed-window, and they fail **open** — if Redis is down
+requests pass with a log line, because a limiter is a protection rather than an
+authorization check.
+
+| Bucket | Limit | Keyed by |
+|---|---|---|
+| `auth` | 10/min | IP |
+| `checkout` | 10/min | IP |
+| `download` | 20/hour | order id |
+| `public` | 120/min | IP |
+| `creator` | 300/min | user id |
+
+A 429 carries `Retry-After` and `X-RateLimit-*` headers. If you are testing and
+keep hitting them:
+
+```bash
+docker exec cf_redis redis-cli --scan --pattern 'ratelimit:*'
+docker exec cf_redis redis-cli FLUSHDB     # dev only
+```
+
+## 9. Storefront cache
+
+Public pages are cached in Redis for 5 minutes and invalidated on write, so an
+edit through the API shows up immediately. Keys are versioned
+(`storefront:v1:page:<username>`), so changing the cached struct does not
+require flushing anything.
+
+```bash
+docker exec cf_redis redis-cli --scan --pattern 'storefront:*'
+```
+
+If a page looks stale, check whether the write path that changed it calls
+`InvalidateProfile`/`InvalidateProduct` — the TTL is the safety net, not the
+mechanism.
+
+## 10. Running everything in Docker
+
+The hybrid setup above is faster to iterate on, but the whole stack can run in
+containers, which is what CI builds and what deployment will use:
+
+```powershell
+docker compose up -d --build     # adds the api container
+docker compose logs -f api
+docker compose ps                # four containers instead of three
+```
+
+The API still answers on `localhost:8080`, so Postman, newman and any tunnel
+work unchanged.
+
+**The one setting that makes this work is `S3_PUBLIC_ENDPOINT`.** Inside Compose
+the API reaches MinIO as `minio:9000`, a hostname that means nothing on your
+host. A presigned URL signed against it is one the browser cannot resolve — and
+the signature covers the host, so it cannot be rewritten afterwards without
+getting a 403. Compose therefore sets:
+
+```yaml
+S3_ENDPOINT: http://minio:9000          # what the API calls
+S3_PUBLIC_ENDPOINT: http://localhost:9000   # what a browser is handed
+```
+
+Running natively, `S3_PUBLIC_ENDPOINT` can stay empty — it falls back to
+`S3_ENDPOINT`, and both are `localhost:9000`. In AWS the same split reappears for
+a different reason: the API reaches S3 over a VPC endpoint while buyers download
+through a public URL or CloudFront.
+
+To go back to the hybrid setup:
+
+```powershell
+docker compose stop api
+cd backend; go run ./cmd/api
+```
+
+## 11. CI
+
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) runs four jobs on every
+push and pull request:
+
+| Job | What it does |
+|---|---|
+| `backend` | gofmt, vet, golangci-lint, build, **migrations up → down -all → up**, `go test -race` with coverage |
+| `vulncheck` | `govulncheck` — fails the build on a known-vulnerable dependency |
+| `docker` | builds the `prod` image, asserts it refuses to start unconfigured and runs as non-root |
+| `frontend` | skips cleanly until `frontend/package.json` exists |
+
+The migration rollback step is there because an untested `.down.sql` is not a
+rollback, and CI is a cheaper place to find a broken one than an incident.
+
+Running the same checks locally:
+
+```bash
+# lint, exactly as CI does
+docker run --rm -v "M:/creatorFlow/backend:/app" -w /app golangci/golangci-lint:latest golangci-lint run
+
+# race detector — needs Linux; the Windows toolchain has no 64-bit gcc for cgo
+docker run --rm --network creatorflow_default -v "M:/creatorFlow/backend:/app" -w /app   -e DATABASE_URL="postgres://creatorflow:<PASSWORD>@postgres:5432/creatorflow?sslmode=disable"   -e REDIS_URL="redis://redis:6379/0" -e GOFLAGS=-buildvcs=false   golang:1.26 go test ./... -race -count=1
+
+# vulnerability scan
+cd backend && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+```
+
+`backend/.golangci.yml` documents the one rule this project declines
+(`S1016`) and why: converting a domain struct straight to its response struct
+would mean a field added to the domain type silently becomes public API.
+
 ## Gotchas hit so far
 
 - **No space after `=` in `.env`.** `KEY= value` is trimmed by the PowerShell

@@ -1,0 +1,30 @@
+version: "2"
+
+linters:
+  default: standard
+
+  exclusions:
+    rules:
+      # S1016 suggests converting a domain struct directly to its response
+      # struct, because their fields currently match field for field.
+      #
+      # Declined on purpose, and this is the reason rather than laziness: the
+      # separate response types exist so that adding a field to a domain type
+      # cannot publish it by accident. A conversion removes that property — the
+      # day someone adds AvatarKey or IsPublished to both structs, the
+      # conversion keeps compiling and the field silently becomes public API.
+      # Writing the fields out means exposing something new is an explicit edit
+      # to a type that exists for that purpose.
+      #
+      # The cost is honest: three mapping functions that look like boilerplate,
+      # and a compiler that will not remind you to update them when a domain
+      # type gains a field you *do* want public.
+      - linters: [staticcheck]
+        text: "S1016:"
+        path: internal/storefront/handler.go
+
+      # Test files are allowed the shortcuts that make a failure readable:
+      # duplicated fixture setup, long table-driven cases, unchecked errors on
+      # cleanup paths where a failure means the test is already lost.
+      - linters: [errcheck, dupl, gosec]
+        path: _test\.go

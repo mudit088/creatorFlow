@@ -2,16 +2,29 @@ name: ci
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
 
+# A second push to the same branch cancels the first. CI still building a commit
+# nobody is looking at any more is just queue time for the one they are.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Must match backend/go.mod. A lower version here fails at build time with a
+  # message about the toolchain rather than about the code, which wastes the
+  # first ten minutes of every investigation.
+  GO_VERSION: "1.26"
+
 jobs:
   backend:
+    name: Backend
     runs-on: ubuntu-latest
+
+    # The same images as docker-compose.yml. Tests that run against a different
+    # PostgreSQL than development uses eventually pass in one place and fail in
+    # the other.
     services:
       postgres:
         image: postgres:16-alpine
@@ -29,7 +42,10 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s
           --health-timeout 3s --health-retries 10
+
     env:
+      # The database-backed tests skip themselves when these are unset, so
+      # setting them here is what makes the majority of the suite actually run.
       DATABASE_URL: postgres://creatorflow:testpassword@localhost:5432/creatorflow_test?sslmode=disable
       REDIS_URL: redis://localhost:6379/0
       S3_BUCKET: test-bucket
@@ -37,6 +53,72 @@ jobs:
       S3_SECRET_KEY: test
       JWT_ACCESS_SECRET: ci-access-secret
       JWT_REFRESH_SECRET: ci-refresh-secret
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      - run: go mod download
+
+      # Cheapest check first: a formatting diff in a pull request buries the
+      # change that matters.
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: backend
+          # Tracks the Go release rather than being pinned: a linter built
+          # against an older toolchain refuses to analyse newer code, which is
+          # how this job silently stops checking anything.
+          version: latest
+
+      - run: go build ./...
+
+      # Pinned, like every other tool in this project. The migrations are the
+      # schema, so CI applies them exactly as a deployment would instead of
+      # loading a dump that can drift from them.
+      - name: Install golang-migrate
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.1
+
+      - name: Apply migrations
+        run: migrate -path ./migrations -database "$DATABASE_URL" up
+
+      # And immediately undo them. An untested rollback is not a rollback, and
+      # the cheapest place to find a broken .down.sql is here rather than during
+      # an incident.
+      - name: Verify migrations roll back and re-apply
+        run: |
+          migrate -path ./migrations -database "$DATABASE_URL" down -all
+          migrate -path ./migrations -database "$DATABASE_URL" up
+
+      # -race because the analytics recorder and the job runner are concurrent,
+      # and a data race that only shows under load is exactly what this catches
+      # before it reaches a server.
+      - run: go test ./... -race -count=1 -coverprofile=coverage.out
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
@@ -44,28 +126,89 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: backend/go.sum
-      - run: go mod download
-      - run: go vet ./...
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: backend
-      - run: go build ./...
-      - run: go test ./... -race -count=1 -coverprofile=coverage.out
 
-  frontend:
+      # This check found SQL injection in pgx, two denial-of-service bugs in
+      # Fiber and two more elsewhere — all in dependencies, all reachable from
+      # this code. It fails the build, because a known-vulnerable dependency is a
+      # defect rather than a warning.
+      #
+      # Deliberately not pinned: the value of the scan is that it knows about
+      # vulnerabilities published after any pin would have been written.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  docker:
+    name: Production image
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+
+      # The prod target specifically. The dev target carries air and the migrate
+      # CLI; what ships must be the small non-root image, not the one that is
+      # convenient locally.
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: prod
+          push: false
+          load: true
+          tags: creatorflow-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # An image that builds but cannot start is a broken deploy found after
+      # merge. This proves the binary runs and refuses to start without its
+      # configuration, naming what is missing.
+      - name: Image refuses to start without configuration
+        run: |
+          output=$(docker run --rm creatorflow-api:ci 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q "missing required environment variables" \
+            || { echo "expected the image to refuse to start without configuration"; exit 1; }
+
+      - name: Image runs as a non-root user
+        run: |
+          uid=$(docker run --rm --entrypoint id creatorflow-api:ci -u)
+          echo "uid: $uid"
+          [ "$uid" != "0" ] || { echo "the production image runs as root"; exit 1; }
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The frontend does not exist yet — frontend/ holds only a Dockerfile. A
+      # job that always fails teaches everyone to ignore red CI, so this one
+      # checks first and skips cleanly until there is something to build.
+      - name: Is there a frontend yet?
+        id: check
+        run: |
+          if [ -f frontend/package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No frontend/package.json — skipping until the frontend exists."
+          fi
+
       - uses: actions/setup-node@v4
+        if: steps.check.outputs.exists == 'true'
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run build
+
+      - if: steps.check.outputs.exists == 'true'
+        working-directory: frontend
+        run: npm ci
+
+      - if: steps.check.outputs.exists == 'true'
+        working-directory: frontend
+        run: npm run lint
+
+      - if: steps.check.outputs.exists == 'true'
+        working-directory: frontend
+        run: npm run build

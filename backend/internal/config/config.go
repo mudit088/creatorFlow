@@ -23,7 +23,11 @@ type Config struct {
 
 	RedisURL string
 
-	S3Endpoint       string
+	S3Endpoint string
+	// S3PublicEndpoint is the address a browser uses. Empty means "same as
+	// S3Endpoint", which is correct anywhere the API and its clients reach
+	// storage by the same route.
+	S3PublicEndpoint string
 	S3Region         string
 	S3Bucket         string
 	S3AccessKey      string
@@ -45,6 +49,13 @@ type Config struct {
 	RazorpayWebhookSecret string
 
 	CORSAllowedOrigins []string
+
+	// TrustedProxies lists the addresses or CIDRs whose X-Forwarded-For header
+	// may be believed. Empty means trust nobody, which is the only safe default:
+	// X-Forwarded-For is a header any client can write, so honouring it without
+	// a proxy in front lets one script appear to be a million addresses and walk
+	// straight through every rate limit.
+	TrustedProxies []string
 }
 
 func (c Config) IsProduction() bool { return c.AppEnv == "production" }
@@ -75,6 +86,7 @@ func Load() (*Config, error) {
 		RedisURL: req("REDIS_URL"),
 
 		S3Endpoint:       optional("S3_ENDPOINT", ""),
+		S3PublicEndpoint: optional("S3_PUBLIC_ENDPOINT", ""),
 		S3Region:         optional("S3_REGION", "ap-south-1"),
 		S3Bucket:         req("S3_BUCKET"),
 		S3AccessKey:      req("S3_ACCESS_KEY"),
@@ -93,6 +105,7 @@ func Load() (*Config, error) {
 		RazorpayWebhookSecret: optional("RAZORPAY_WEBHOOK_SECRET", ""),
 
 		CORSAllowedOrigins: splitCSV(optional("CORS_ALLOWED_ORIGINS", "http://localhost:3000")),
+		TrustedProxies:     splitCSV(optional("TRUSTED_PROXIES", "")),
 	}
 
 	if len(missing) > 0 {
@@ -112,6 +125,19 @@ func Load() (*Config, error) {
 		// quietly reporting inflated numbers.
 		if cfg.AnalyticsSalt == "" {
 			return nil, fmt.Errorf("refusing to start: ANALYTICS_SALT is required in production")
+		}
+		// A wildcard origin with credentials is the classic CORS mistake: it
+		// tells every site on the internet that it may make authenticated
+		// requests to this API with the user's cookies attached. Browsers refuse
+		// the literal combination, but Fiber will happily echo the request's
+		// origin instead, which is the same hole with extra steps.
+		for _, origin := range cfg.CORSAllowedOrigins {
+			if origin == "*" {
+				return nil, fmt.Errorf("refusing to start: CORS_ALLOWED_ORIGINS cannot be '*' when credentials are allowed")
+			}
+			if !strings.HasPrefix(origin, "https://") {
+				return nil, fmt.Errorf("refusing to start: CORS origin %q must be https in production", origin)
+			}
 		}
 	}
 
