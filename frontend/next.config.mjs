@@ -4,6 +4,10 @@ const nextConfig = {
   // and runs server.js. Without it that COPY fails and the image cannot build.
   output: "standalone",
 
+  // Hides the dev-only overlay button. It is useful while developing but it
+  // sits in the corner of every screenshot taken for design review.
+  devIndicators: false,
+
   // Deliberately NOT enabling cacheComponents / "use cache" for storefront
   // pages. The Go API already caches them in Redis for five minutes and drops
   // the entry when a creator edits their page. A second cache here would have

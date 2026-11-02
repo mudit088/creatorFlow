@@ -1,26 +1,171 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * The design system is defined as theme tokens, which is what makes it a system
+ * rather than a convention: Tailwind v4 generates a utility for every token
+ * here, so `--color-card` becomes `bg-card` and `--radius-card` becomes
+ * `rounded-card`. Components use those generated names, so a value can be
+ * changed in one place and nothing can drift.
+ *
+ * Token names are chosen to read well as utilities — `bg-canvas`, `text-ink`,
+ * `border-line` — because a name that produces `border-border-subtle` is a name
+ * people will quietly stop using.
+ */
+@theme {
+  /* Brand: one violet, used sparingly. It marks the single action that matters
+   * on a page — buy, save, publish — so that when it appears it means
+   * something. A palette where everything is branded has no emphasis left. */
+  --color-brand-50: oklch(0.977 0.014 308);
+  --color-brand-100: oklch(0.946 0.033 307);
+  --color-brand-200: oklch(0.902 0.063 306);
+  --color-brand-300: oklch(0.827 0.109 306);
+  --color-brand-400: oklch(0.714 0.166 305);
+  --color-brand-500: oklch(0.627 0.205 304);
+  --color-brand-600: oklch(0.558 0.225 303);
+  --color-brand-700: oklch(0.496 0.21 303);
+  --color-brand-800: oklch(0.42 0.177 304);
+  --color-brand-900: oklch(0.359 0.144 305);
+
+  /* Surfaces, lines and text. Semantic names, so dark mode is a change to what
+   * they resolve to rather than a conditional class on every element. */
+  --color-canvas: oklch(0.985 0.002 265);
+  --color-card: oklch(1 0 0);
+  --color-raised: oklch(1 0 0);
+  --color-line: oklch(0.922 0.004 265);
+  --color-line-strong: oklch(0.86 0.006 265);
+  --color-ink: oklch(0.21 0.008 265);
+  --color-ink-soft: oklch(0.45 0.01 265);
+  --color-ink-muted: oklch(0.6 0.012 265);
+
+  --color-success: oklch(0.63 0.16 150);
+  --color-danger: oklch(0.58 0.21 25);
+
+  /* Geist, loaded by next/font in the root layout, which exposes it as
+   * --font-geist-sans. Mapping it here is what makes it the default for every
+   * utility and for body text; without this the whole app silently falls back
+   * to the system stack. */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  /* A restrained radius scale. Mixing many radii is the fastest way to make an
+   * interface look assembled rather than designed. */
+  --radius-card: 1rem;
+  --radius-control: 0.625rem;
+
+  /* Shadows are layered — a tight contact shadow plus a soft ambient one —
+   * because one large blur reads as a sticker floating above the page. */
+  --shadow-subtle: 0 1px 2px oklch(0.21 0.008 265 / 0.04), 0 1px 3px oklch(0.21 0.008 265 / 0.06);
+  --shadow-raised: 0 1px 2px oklch(0.21 0.008 265 / 0.05), 0 8px 24px -8px oklch(0.21 0.008 265 / 0.1);
+  --shadow-lifted: 0 2px 4px oklch(0.21 0.008 265 / 0.05), 0 18px 40px -12px oklch(0.21 0.008 265 / 0.16);
+
+  /* One easing curve for everything that moves. Motion that starts fast and
+   * settles reads as physical; linear motion reads as a computer animating. */
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
+/*
+ * Dark mode redefines the variables rather than the theme block, because the
+ * generated utilities already reference var(--color-card) — so changing the
+ * variable changes every utility at once, with no dark: variant anywhere.
+ */
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --color-canvas: oklch(0.145 0.005 265);
+    --color-card: oklch(0.197 0.007 265);
+    --color-raised: oklch(0.235 0.008 265);
+    --color-line: oklch(0.28 0.008 265);
+    --color-line-strong: oklch(0.37 0.01 265);
+    --color-ink: oklch(0.97 0.002 265);
+    --color-ink-soft: oklch(0.74 0.008 265);
+    --color-ink-muted: oklch(0.6 0.009 265);
+
+    --shadow-subtle: 0 1px 2px oklch(0 0 0 / 0.4), 0 1px 3px oklch(0 0 0 / 0.3);
+    --shadow-raised: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px -8px oklch(0 0 0 / 0.55);
+    --shadow-lifted: 0 2px 4px oklch(0 0 0 / 0.45), 0 18px 40px -12px oklch(0 0 0 / 0.65);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Respecting this is not a nicety: for some people motion causes actual
+   * nausea, and the system setting is how they have already said so. */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-feature-settings: "kern", "liga", "calt";
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* One focus style for the whole app, and never `outline: none`. A keyboard
+   * user who cannot see where they are is locked out of the interface, and
+   * removing the ring without replacing it is the most common accessibility
+   * failure in otherwise polished sites. */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: 0.3rem;
+  }
+
+  /* Headings tighten as they grow. Default tracking is set for body text and
+   * leaves display sizes looking loose and unanchored. */
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+    letter-spacing: -0.021em;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+@layer utilities {
+  /* Content that fades in from slightly below reads as arriving rather than
+   * appearing. Used once per view, never on every element. */
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-rise {
+    animation: rise-in 0.5s var(--ease-soft) both;
+  }
+
+  /* Staggering children turns a list that appears all at once into one that
+   * resolves. The delays are deliberately small — longer feels slow, not
+   * polished. */
+  .stagger > * {
+    animation: rise-in 0.45s var(--ease-soft) both;
+  }
+  .stagger > *:nth-child(1) { animation-delay: 0.05s; }
+  .stagger > *:nth-child(2) { animation-delay: 0.1s; }
+  .stagger > *:nth-child(3) { animation-delay: 0.15s; }
+  .stagger > *:nth-child(4) { animation-delay: 0.2s; }
+  .stagger > *:nth-child(5) { animation-delay: 0.25s; }
+  .stagger > *:nth-child(n + 6) { animation-delay: 0.3s; }
 }

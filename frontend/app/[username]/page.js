@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { Avatar, Badge, InteractiveCard } from "@/components/ui";
 import { ApiError, formatMoney, getPublicProfile } from "@/lib/api";
 
 /**
@@ -8,20 +9,20 @@ import { ApiError, formatMoney, getPublicProfile } from "@/lib/api";
  *
  * A dynamic segment rather than a literal "@" folder: in the App Router a
  * directory named @something is a parallel route slot, so the "@" has to live
- * in the value. The check below is what keeps this route from swallowing every
+ * in the value. The check below keeps this route from swallowing every
  * unmatched path — /dashboard resolves to its own static route first, and
- * anything else that is not a handle is a 404 rather than a failed API call.
+ * anything that is not a handle is a 404 rather than a failed API call.
  */
 function handleFrom(segment) {
   // The segment arrives percent-encoded on some code paths and decoded on
-  // others — the same request reaches the page as "@rahul" and generateMetadata
-  // as "%40rahul". Decoding first makes both spellings the same value, which is
-  // why this is not simply segment.startsWith("@").
+  // others — the same request reaches the page as "@rahul" and
+  // generateMetadata as "%40rahul". Decoding first makes both spellings the
+  // same value, which is why this is not simply segment.startsWith("@").
   let decoded = segment;
   try {
     decoded = decodeURIComponent(segment);
   } catch {
-    // Malformed escapes (a bare "%") throw. That is not a handle either way.
+    // Malformed escapes (a bare "%") throw. Not a handle either way.
     return null;
   }
 
@@ -29,10 +30,10 @@ function handleFrom(segment) {
 }
 
 /**
- * Note there is no "use cache" here. The Go API already caches this page in
- * Redis and drops the entry the moment the creator edits it; caching again at
- * this layer would add an expiry that invalidation cannot reach, so an edit
- * would look applied in the database and stale on the site.
+ * No "use cache" here. The Go API already caches this page in Redis and drops
+ * the entry when the creator edits it; caching again at this layer would add an
+ * expiry that invalidation cannot reach, so an edit would look applied in the
+ * database and stale on the site.
  */
 export default async function CreatorPage({ params }) {
   // params is a Promise in Next 16 — awaiting it is required, not stylistic.
@@ -50,8 +51,7 @@ export default async function CreatorPage({ params }) {
     // The API answers 404 for "no such creator", "not published yet" and
     // "reserved handle" identically, on purpose — distinguishing them would
     // turn this page into a directory of drafts. Anything else is a real
-    // failure and should reach the error boundary rather than be shown as an
-    // empty page.
+    // failure and belongs in the error boundary, not shown as an empty page.
     if (error instanceof ApiError && error.isNotFound) {
       notFound();
     }
@@ -61,58 +61,85 @@ export default async function CreatorPage({ params }) {
   const { creator, links, products } = page;
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-xl px-5 py-14">
-      <header className="text-center">
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+    <main className="relative mx-auto w-full max-w-lg px-5 pb-20 pt-16 sm:pt-24">
+      {/* A soft wash behind the header. It gives the page a focal point without
+          an image, and fades out before the content so nothing competes with
+          the products. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 bg-gradient-to-b from-brand-100/70 via-brand-50/30 to-transparent dark:from-brand-900/25 dark:via-brand-900/10"
+      />
+
+      <header className="animate-rise flex flex-col items-center text-center">
+        <Avatar name={creator.display_name} size={84} />
+
+        <h1 className="mt-5 text-[1.75rem] font-semibold leading-tight text-ink">
           {creator.display_name}
         </h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">@{creator.username}</p>
+        <p className="mt-1 text-sm font-medium text-ink-muted">@{creator.username}</p>
+
         {creator.bio ? (
-          <p className="mx-auto mt-4 max-w-md text-balance text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
+          <p className="mt-4 max-w-sm text-[0.9375rem] leading-relaxed text-ink-soft">
             {creator.bio}
           </p>
         ) : null}
       </header>
 
       {links.length > 0 ? (
-        <nav className="mt-10 flex flex-col gap-3">
+        <nav aria-label="Links" className="stagger mt-10 flex flex-col gap-2.5">
           {links.map((link) => (
-            <a
-              key={link.click_url}
+            <InteractiveCard key={link.click_url} as="a"
               // click_url, not url: it records the click and then redirects.
-              // The destination is still in `url` so a visitor can see where a
-              // link goes before following it, and so a crawler can read it.
+              // The destination stays in `url` so a visitor can see where a
+              // link goes before following it, and a crawler can read it.
               href={link.click_url}
-              className="rounded-xl border border-zinc-200 bg-white px-4 py-3 text-center text-sm font-medium text-zinc-800 transition hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
-              // These leave our site, so deny the tab-hijacking capability and
-              // keep our URLs out of the destination's referrer log.
+              // These leave our site: deny the tab-hijacking capability and keep
+              // our URLs out of the destination's referrer log.
               rel="noopener noreferrer"
+              className="flex items-center justify-between px-5 py-4"
             >
-              {link.title}
-            </a>
+              <span className="text-[0.9375rem] font-medium text-ink">
+                {link.title}
+              </span>
+              <ArrowIcon className="size-4 shrink-0 text-ink-muted transition-transform duration-250 ease-soft group-hover:translate-x-0.5 group-hover:text-brand-600" />
+            </InteractiveCard>
           ))}
         </nav>
       ) : null}
 
       {products.length > 0 ? (
-        <section className="mt-12">
-          <h2 className="mb-4 text-xs font-semibold uppercase tracking-widest text-zinc-400">
+        <section aria-labelledby="products-heading" className="mt-12">
+          <h2
+            id="products-heading"
+            className="mb-3 px-1 text-xs font-semibold uppercase tracking-[0.12em] text-ink-muted"
+          >
             Products
           </h2>
-          <ul className="flex flex-col gap-3">
+
+          <ul className="stagger flex flex-col gap-2.5">
             {products.map((product) => (
               <li key={product.slug}>
-                <Link
-                  href={`/${username}/${product.slug}`}
-                  className="flex items-center justify-between gap-4 rounded-xl border border-zinc-200 bg-white px-4 py-4 transition hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:bg-zinc-800"
-                >
-                  <span className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                    {product.title}
-                  </span>
-                  <span className="shrink-0 text-sm tabular-nums text-zinc-600 dark:text-zinc-300">
-                    {formatMoney(product.price_minor, product.currency)}
-                  </span>
-                </Link>
+                <InteractiveCard as={Link} href={`/${username}/${product.slug}`} className="block px-5 py-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <span className="text-[0.9375rem] font-medium leading-snug text-ink transition-colors duration-250 ease-soft group-hover:text-brand-700 dark:group-hover:text-brand-300">
+                      {product.title}
+                    </span>
+                    <Badge className="shrink-0 tabular-nums">
+                      {formatMoney(product.price_minor, product.currency)}
+                    </Badge>
+                  </div>
+
+                  {/* The description rather than a repeated "View details". The
+                      card is already obviously a link; three identical calls to
+                      action down the page are noise where the one line that
+                      helps someone decide would go. Clamped to two lines so a
+                      long description cannot reshape the list. */}
+                  {product.description ? (
+                    <p className="mt-1.5 line-clamp-2 text-sm leading-relaxed text-ink-muted">
+                      {product.description}
+                    </p>
+                  ) : null}
+                </InteractiveCard>
               </li>
             ))}
           </ul>
@@ -120,11 +147,34 @@ export default async function CreatorPage({ params }) {
       ) : null}
 
       {links.length === 0 && products.length === 0 ? (
-        <p className="mt-12 text-center text-sm text-zinc-500">
+        <p className="animate-rise mt-14 text-center text-sm text-ink-muted">
           This page has nothing on it yet.
         </p>
       ) : null}
+
+      <footer className="mt-16 text-center">
+        <Link
+          href="/"
+          className="text-xs font-medium text-ink-muted transition-colors hover:text-ink-soft"
+        >
+          Made with CreatorFlow
+        </Link>
+      </footer>
     </main>
+  );
+}
+
+function ArrowIcon({ className }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M6 3.5 10.5 8 6 12.5"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

@@ -1,4 +1,6 @@
 import { Geist, Geist_Mono } from "next/font/google";
+
+import { AuthProvider } from "@/components/AuthProvider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,7 +30,9 @@ export default function RootLayout({ children }) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
-        {children}
+        {/* Wraps everything so a page reload can rebuild the session from the
+            refresh cookie before any protected page decides what to render. */}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
